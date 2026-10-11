@@ -24,6 +24,9 @@ class NtdllHooks
 
     static NTSTATUS NTAPI hkRtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation)
     {
+        if (ThreadHasNoTls())
+            return o_RtlGetVersion(lpVersionInformation);
+
         if (lpVersionInformation == nullptr)
             return STATUS_INVALID_PARAMETER;
 
@@ -44,6 +47,9 @@ class NtdllHooks
     static NTSTATUS NTAPI hkLdrLoadDll(PWSTR PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
                                        PHANDLE ModuleHandle)
     {
+        if (ThreadHasNoTls())
+            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
@@ -98,6 +104,9 @@ class NtdllHooks
     static NTSTATUS NTAPI hkNtLoadDll(PUNICODE_STRING PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
                                       PHANDLE ModuleHandle)
     {
+        if (ThreadHasNoTls())
+            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
@@ -158,6 +167,9 @@ class NtdllHooks
 
     static NTSTATUS NTAPI hkLdrUnloadDll(PVOID lpLibrary)
     {
+        if (ThreadHasNoTls())
+            return o_LdrUnloadDll(lpLibrary);
+
         if (lpLibrary == nullptr)
             return STATUS_INVALID_PARAMETER;
 

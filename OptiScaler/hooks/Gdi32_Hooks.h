@@ -16,6 +16,9 @@ inline static PFN_D3DKMTQueryAdapterInfo o_D3DKMTQueryAdapterInfo = nullptr;
 VALIDATE_HOOK(hkD3DKMTQueryAdapterInfo, PFN_D3DKMTQueryAdapterInfo)
 static NTSTATUS hkD3DKMTQueryAdapterInfo(const D3DKMT_QUERYADAPTERINFO* data)
 {
+    if (ThreadHasNoTls())
+        return o_D3DKMTQueryAdapterInfo(data);
+
     auto result = o_D3DKMTQueryAdapterInfo(data);
 
     // LOG_INFO("Adapter into type: {}", (uint32_t)data->Type);

@@ -14,6 +14,9 @@ static PFN_WinVerifyTrust o_WinVerifyTrust = nullptr;
 VALIDATE_HOOK(hkWinVerifyTrust, PFN_WinVerifyTrust)
 static LONG hkWinVerifyTrust(HWND hwnd, GUID* pgActionID, LPVOID pWVTData)
 {
+    if (ThreadHasNoTls())
+        return o_WinVerifyTrust(hwnd, pgActionID, pWVTData);
+
     if (!pWVTData || !IsEqualGUID(*pgActionID, WINTRUST_ACTION_GENERIC_VERIFY_V2))
         return o_WinVerifyTrust(hwnd, pgActionID, pWVTData);
 

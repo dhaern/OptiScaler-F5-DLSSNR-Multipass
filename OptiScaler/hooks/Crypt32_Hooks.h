@@ -17,6 +17,11 @@ static BOOL hkCryptQueryObject(DWORD dwObjectType, const void* pvObject, DWORD d
                                DWORD* pdwContentType, DWORD* pdwFormatType, HCERTSTORE* phCertStore, HCRYPTMSG* phMsg,
                                const void** ppvContext)
 {
+    if (ThreadHasNoTls())
+        return o_CryptQueryObject(dwObjectType, pvObject, dwExpectedContentTypeFlags, dwExpectedFormatTypeFlags,
+                                  dwFlags, pdwMsgAndCertEncodingType, pdwContentType, pdwFormatType, phCertStore, phMsg,
+                                  ppvContext);
+
     if (dwObjectType == CERT_QUERY_OBJECT_FILE && pvObject)
     {
         std::wstring originalPath((WCHAR*) pvObject);

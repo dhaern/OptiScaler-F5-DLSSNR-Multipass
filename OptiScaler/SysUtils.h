@@ -86,6 +86,8 @@ inline HMODULE d3d12AgilityModule = nullptr;
 inline HMODULE slInterposerModule = nullptr;
 inline DWORD processId;
 
+#include "misc/ThreadTls.h"
+
 #define LOG_TRACE(msg, ...) spdlog::trace(__FUNCTION__ " " msg, ##__VA_ARGS__)
 
 #define LOG_DEBUG(msg, ...) spdlog::debug(__FUNCTION__ " " msg, ##__VA_ARGS__)

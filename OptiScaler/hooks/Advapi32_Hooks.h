@@ -358,6 +358,9 @@ VALIDATE_HOOK(hkRegQueryValueExW, PFN_RegQueryValueExW)
 static LONG hkRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData,
                                LPDWORD lpcbData)
 {
+    if (ThreadHasNoTls())
+        return o_RegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+
     static std::wstring vendorId = std::format(L"VEN_{:04X}", Config::Instance()->SpoofedVendorId.value_or_default());
     static std::wstring deviceId = std::format(L"DEV_{:04X}", Config::Instance()->SpoofedDeviceId.value_or_default());
     std::wstring valueName = L"";
@@ -530,6 +533,9 @@ VALIDATE_HOOK(hkRegQueryValueExA, PFN_RegQueryValueExA)
 LONG WINAPI hkRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData,
                                LPDWORD lpcbData)
 {
+    if (ThreadHasNoTls())
+        return o_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+
     static std::string vendorId = std::format("VEN_{:04X}", Config::Instance()->SpoofedVendorId.value_or_default());
     static std::string deviceId = std::format("DEV_{:04X}", Config::Instance()->SpoofedDeviceId.value_or_default());
     std::string valueName = "";

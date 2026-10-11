@@ -941,6 +941,9 @@
     <ClInclude Include="misc\REFrameworkCompatCore.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\ThreadTls.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>

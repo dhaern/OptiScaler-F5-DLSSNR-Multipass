@@ -425,6 +425,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="misc\IdentifyGpu.h" />
     <ClInclude Include="misc\REFrameworkCompat.h" />
     <ClInclude Include="misc\REFrameworkCompatCore.h" />
+    <ClInclude Include="misc\ThreadTls.h" />
     <ClInclude Include="inputs\FSR2_Dx11.h" />
     <ClInclude Include="inputs\FSR2_Vk.h" />
     <ClInclude Include="inputs\XeSS_Dx11.h" />
