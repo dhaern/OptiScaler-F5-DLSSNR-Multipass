@@ -2097,9 +2097,23 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                                      ppvRootSignature);
     }
 
+    // The device hooks can be installed without D3D12Hooks::Hook() having run (d3d12.dll already loaded when the
+    // game created its device, e.g. World of Warcraft), which leaves the export trampolines null. Use the export
+    // itself then: it is not detoured in that case, so the overrides are not applied twice.
+    const auto createDeserializer = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_();
+    const auto serializeVersioned = o_D3D12SerializeVersionedRootSignature != nullptr
+                                        ? o_D3D12SerializeVersionedRootSignature
+                                        : D3d12Proxy::D3D12SerializeVersionedRootSignature_();
+
+    if (createDeserializer == nullptr || (samplerOverride && serializeVersioned == nullptr))
+    {
+        LOG_WARN("D3D12 root signature functions unavailable, passing the root signature through unchanged");
+        return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
+                                     ppvRootSignature);
+    }
+
     ID3D12VersionedRootSignatureDeserializer* deserializer = nullptr;
-    auto result = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_()(
-        pBlobWithRootSignature, blobLengthInBytes, IID_PPV_ARGS(&deserializer));
+    auto result = createDeserializer(pBlobWithRootSignature, blobLengthInBytes, IID_PPV_ARGS(&deserializer));
 
     // Deserialize the blob
     if (FAILED(result))
@@ -2180,7 +2194,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     result = S_OK;
 
     // Reserialize
-    result = o_D3D12SerializeVersionedRootSignature(&descCopy, &newBlob, &errorBlob);
+    result = serializeVersioned(&descCopy, &newBlob, &errorBlob);
 
     if (SUCCEEDED(result))
     {
