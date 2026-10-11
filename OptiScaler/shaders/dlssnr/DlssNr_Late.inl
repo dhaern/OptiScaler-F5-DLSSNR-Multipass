@@ -413,6 +413,12 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
         Late::Say(Late::pausedForGameFg);
         return;
     }
+    // Nothing captured from the game's own upscaler is waiting: leave the history alone. With native input the
+    // picture is owned by ApplyNativeInput, and rejecting a swapchain format here (B8G8R8A8 in World of Warcraft)
+    // would Cancel() and reset the shared history on every present.
+    if (std::none_of(Late::slots.begin(), Late::slots.end(),
+                     [](const auto& slot) { return slot.pending && slot.submitted; }))
+        return;
     Late::ComPtr<IDXGISwapChain3> sc;
     Late::ComPtr<ID3D12Resource> color;
     Late::ComPtr<ID3D12Device> currentDevice;
