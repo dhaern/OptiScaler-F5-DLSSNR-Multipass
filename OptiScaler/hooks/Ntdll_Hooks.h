@@ -168,7 +168,13 @@ class NtdllHooks
     static NTSTATUS NTAPI hkLdrUnloadDll(PVOID lpLibrary)
     {
         if (ThreadHasNoTls())
+        {
+            // See KernelHooks::hk_K32_FreeLibrary
+            if (LibraryLoadHooks::IsKeptLoaded(lpLibrary))
+                return (NTSTATUS) 0x00000000L;
+
             return o_LdrUnloadDll(lpLibrary);
+        }
 
         if (lpLibrary == nullptr)
             return STATUS_INVALID_PARAMETER;

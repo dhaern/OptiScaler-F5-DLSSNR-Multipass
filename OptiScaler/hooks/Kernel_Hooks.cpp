@@ -569,7 +569,14 @@ VALIDATE_HOOK(hk_K32_FreeLibrary, Kernel32Proxy::PFN_FreeLibrary)
 BOOL KernelHooks::hk_K32_FreeLibrary(HMODULE lpLibrary)
 {
     if (ThreadHasNoTls())
+    {
+        // Still keep OptiScaler and the proxies loaded (their detours are live), the bookkeeping in modulesToFree
+        // is skipped: it needs State
+        if (LibraryLoadHooks::IsKeptLoaded(lpLibrary))
+            return TRUE;
+
         return o_K32_FreeLibrary(lpLibrary);
+    }
 
     if (lpLibrary == nullptr)
         return STATUS_INVALID_PARAMETER;

@@ -11,6 +11,9 @@ class LibraryLoadHooks
     static HMODULE LoadLibraryCheckA(std::string libName, LPCSTR lpLibFullPath);
     static HMODULE LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath);
     static std::optional<NTSTATUS> FreeLibrary(PVOID library);
+    // True for the modules FreeLibrary keeps loaded. Reads plain globals only, so it is safe on threads without a
+    // static-TLS array (misc/ThreadTls.h), where FreeLibrary itself can't run.
+    static bool IsKeptLoaded(PVOID library);
 
     static HMODULE LoadNvApi();
     // static HMODULE LoadFfxapiVk(std::wstring originalPath);

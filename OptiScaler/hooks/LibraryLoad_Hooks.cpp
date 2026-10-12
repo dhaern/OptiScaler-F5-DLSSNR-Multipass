@@ -639,6 +639,18 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     return nullptr;
 }
 
+// Same list as FreeLibrary below, keep them in sync
+bool LibraryLoadHooks::IsKeptLoaded(PVOID library)
+{
+    if (library == nullptr)
+        return false;
+
+    return library == dllModule || library == FfxApiProxy::Dx12Module() || library == FfxApiProxy::VkModule() ||
+           library == XeSSProxy::Module() || library == DxgiProxy::Module() || library == D3d12Proxy::Module() ||
+           library == Kernel32Proxy::Module() || library == KernelBaseProxy::Module() ||
+           library == NtdllProxy::Module() || library == vulkanModule || library == d3d11Module;
+}
+
 std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)
 {
     std::optional<NTSTATUS> result;
