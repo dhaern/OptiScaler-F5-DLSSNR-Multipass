@@ -2097,9 +2097,9 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                                      ppvRootSignature);
     }
 
-    // The device hooks can be installed without D3D12Hooks::Hook() having run (d3d12.dll already loaded when the
-    // game created its device, e.g. World of Warcraft), which leaves the export trampolines null. Use the export
-    // itself then: it is not detoured in that case, so the overrides are not applied twice.
+    // The device hooks can be installed without D3D12Hooks::Hook() having run (seen in World of Warcraft), which leaves
+    // the export trampolines null. Use the export itself then: it is not detoured in that case, so the overrides are
+    // not applied twice.
     const auto createDeserializer = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_();
     const auto serializeVersioned = o_D3D12SerializeVersionedRootSignature != nullptr
                                         ? o_D3D12SerializeVersionedRootSignature
@@ -2109,7 +2109,8 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
     {
         static std::atomic<bool> warned { false };
         if (!warned.exchange(true))
-            LOG_WARN("D3D12 root signature functions unavailable, passing root signatures through unchanged");
+            LOG_ERROR("D3D12 root signature functions unavailable, passing root signatures through unchanged: no "
+                      "mipmap bias/anisotropy override, ExtendedStateRestore or persistent HUDFix bindings");
 
         return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
                                      ppvRootSignature);

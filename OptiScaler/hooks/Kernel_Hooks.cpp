@@ -398,6 +398,8 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI KernelHooks::hk_K32_SetUnhandledExceptionFil
 VALIDATE_HOOK(hk_K32_ExitProcess, Kernel32Proxy::PFN_ExitProcess)
 VOID WINAPI KernelHooks::hk_K32_ExitProcess(UINT uExitCode)
 {
+    // No log drain on a thread without a TLS array: posting the flush marker goes through spdlog's thread_local
+    // thread id and would fault. The last queued lines can be lost on that path.
     if (ThreadHasNoTls())
     {
         o_K32_ExitProcess(uExitCode);
