@@ -2245,6 +2245,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     }
 
     case DLL_PROCESS_DETACH:
+        // ExitProcess from a thread without a static-TLS array (misc/ThreadTls.h; hk_K32_ExitProcess forwards those
+        // untouched) runs this detach on that thread: State::Instance() would fault. Nothing below runs on process
+        // exit anyway, and the loader hooks pass such a thread straight through.
+        if (lpReserved != nullptr && ThreadHasNoTls())
+            break;
+
         State::Instance().isShuttingDown = true;
 
         // ExitProcess has already stopped other threads. No DLL unloading, logging,
