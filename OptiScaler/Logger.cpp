@@ -283,6 +283,16 @@ static FilterFn SetFilterReal(FilterFn filter)
 
 static LONG WINAPI CrashDumpHandler(EXCEPTION_POINTERS* exceptionInfo)
 {
+    // A thread without a static-TLS array (misc/ThreadTls.h) faults on Entry's thread_local and on every logger
+    // call below: hand the crash straight to the game's filter instead (g_filterChain is a plain atomic).
+    if (ThreadHasNoTls())
+    {
+        if (const auto next = g_filterChain.Next(); next != nullptr)
+            return next(exceptionInfo);
+
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     logasync::FilterChain<FilterFn>::Entry entry;
 
     // A crash inside this handler: no second dump, the game's filter is next
