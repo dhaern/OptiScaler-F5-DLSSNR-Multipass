@@ -2,6 +2,8 @@
 #include <Config.h>
 #include "IFeature.h"
 
+#include <atomic>
+
 void IFeature::SetHandle(unsigned int InHandleId)
 {
     _handle = new NVSDK_NGX_Handle { InHandleId };
@@ -178,7 +180,12 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, OutHeight) !=
             NVSDK_NGX_Result_Success)
     {
-        LOG_WARN("No subrect dimension info!");
+        // Every evaluate of a caller that never sets a subrect (OptiScaler's own virtual upscaler, many games) lands
+        // here: warn a few times, not once per frame (thousands of identical [W] lines per run otherwise).
+        static std::atomic<uint32_t> noSubrectWarnings { 0 };
+        if (noSubrectWarnings.load(std::memory_order_relaxed) < 8 &&
+            noSubrectWarnings.fetch_add(1, std::memory_order_relaxed) < 8)
+            LOG_WARN("No subrect dimension info!");
 
         unsigned int width;
         unsigned int height;
