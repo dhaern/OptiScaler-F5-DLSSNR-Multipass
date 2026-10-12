@@ -2107,7 +2107,10 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
 
     if (createDeserializer == nullptr || (samplerOverride && serializeVersioned == nullptr))
     {
-        LOG_WARN("D3D12 root signature functions unavailable, passing the root signature through unchanged");
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+            LOG_WARN("D3D12 root signature functions unavailable, passing root signatures through unchanged");
+
         return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
                                      ppvRootSignature);
     }
