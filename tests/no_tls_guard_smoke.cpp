@@ -6,6 +6,7 @@
 // x64 MSVC, keep thread-safe statics on (the default), no game needed:
 // cl /std:c++20 /EHsc /W4 /O2 tests/no_tls_guard_smoke.cpp
 // Adding /DNO_TLS_GUARD removes the guard from the stand-in hook: the test must then fail (RED).
+// Also checks LeakedInstance (State::Instance()), which static destructors reach on such a thread during ExitProcess.
 #include "../OptiScaler/misc/ThreadTls.h"
 
 #include <windows.h>
@@ -93,6 +94,58 @@ __declspec(noinline) static void CallWithTls(bool clearTls, HMODULE module, Resu
     }
 }
 
+static volatile long constructions = 0;
+
+struct Leaked
+{
+    int value;
+    Leaked() : value(seed) { ++constructions; }
+};
+
+__declspec(noinline) static int ExistingValue()
+{
+    auto* instance = LeakedInstance<Leaked>::Existing();
+    return instance != nullptr ? instance->value : -1;
+}
+
+__declspec(noinline) static int GetValue() { return LeakedInstance<Leaked>::Get().value; }
+
+struct Probe
+{
+    DWORD exception = 0;
+    int value = 0;
+};
+
+__declspec(noinline) static void ProbeWithTls(bool clearTls, int (*fn)(), Probe& p)
+{
+    const unsigned __int64 saved = __readgsqword(0x58);
+    __try
+    {
+        if (clearTls)
+            __writegsqword(0x58, 0);
+
+        p.value = fn();
+    }
+    __finally
+    {
+        __writegsqword(0x58, saved);
+    }
+}
+
+static Probe RunProbe(bool clearTls, int (*fn)())
+{
+    Probe p;
+    __try
+    {
+        ProbeWithTls(clearTls, fn, p);
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        p.exception = EXCEPTION_ACCESS_VIOLATION;
+    }
+    return p;
+}
+
 static Result Call(bool clearTls, HMODULE module)
 {
     Result r;
@@ -145,6 +198,28 @@ int main()
     CHECK(r.value == 0x1357);
     CHECK(originalCalls == 3);
     CHECK(initialisations == 1);
+    CHECK(__readgsqword(0x58) == tls);
+
+    // The thread-safe static itself still faults there, which is why State::Instance() no longer is one
+    auto p = RunProbe(true, TouchState);
+    CHECK(p.exception == EXCEPTION_ACCESS_VIOLATION);
+    CHECK(__readgsqword(0x58) == tls);
+
+    // LeakedInstance before the first Get(): Existing() answers nullptr without TLS and creates nothing
+    p = RunProbe(true, ExistingValue);
+    CHECK(p.exception == 0 && p.value == -1);
+    CHECK(constructions == 0);
+
+    // Created on a normal thread, then reachable without TLS through both entry points
+    p = RunProbe(false, GetValue);
+    CHECK(p.exception == 0 && p.value == seed);
+    CHECK(constructions == 1);
+
+    p = RunProbe(true, GetValue);
+    CHECK(p.exception == 0 && p.value == seed);
+    p = RunProbe(true, ExistingValue);
+    CHECK(p.exception == 0 && p.value == seed);
+    CHECK(constructions == 1);
     CHECK(__readgsqword(0x58) == tls);
 
     if (fails == 0)

@@ -2,6 +2,8 @@
 
 #include <intrin.h>
 
+#include <atomic>
+
 // Some processes run threads whose TEB has no static-TLS array (ThreadLocalStoragePointer == nullptr). World of
 // Warcraft's Wow_loader.dll does, and calls FreeLibrary/LoadLibrary/GetProcAddress from them. MSVC dereferences that
 // array for thread_local variables and for the epoch check of thread-safe function-local statics (State::Instance()
@@ -19,3 +21,30 @@ inline bool ThreadHasNoTls()
     return false;
 #endif
 }
+
+// A leaked singleton that can be reached from a thread without a static-TLS array once it exists. Get() reads a
+// constant-initialized pointer, so only the first call goes through a thread-safe static. Existing() never does and
+// returns nullptr until the first Get(). T makes LeakedInstance<T> a friend if its constructor is private.
+template <typename T> class LeakedInstance
+{
+  public:
+    static T& Get()
+    {
+        if (auto* instance = _instance.load(std::memory_order_acquire))
+            return *instance;
+
+        return Create();
+    }
+
+    static T* Existing() { return _instance.load(std::memory_order_acquire); }
+
+  private:
+    __declspec(noinline) static T& Create()
+    {
+        static auto* instance = new T;
+        _instance.store(instance, std::memory_order_release);
+        return *instance;
+    }
+
+    inline static constinit std::atomic<T*> _instance { nullptr };
+};

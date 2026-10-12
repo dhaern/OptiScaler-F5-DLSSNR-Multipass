@@ -3,6 +3,7 @@
 
 #include "misc/Quirks.h"
 #include "misc/SkipSpoof.h"
+#include "misc/ThreadTls.h"
 #include "framegen/IFGFeature_Dx12.h"
 #include "framegen/FGFollowGameRule.h"
 #include <inputs/FG/Streamline_Inputs_Dx12.h>
@@ -141,12 +142,12 @@ typedef struct CapturedHudlessInfo
 class State
 {
   public:
-    static State& Instance()
-    {
-        // Hooks still read the shutdown flag during other DLLs' detach callbacks.
-        static auto* instance = new State;
-        return *instance;
-    }
+    // Leaked: hooks still read the shutdown flag during other DLLs' detach callbacks. Reachable without thread-local
+    // storage once created, e.g. from static destructors run by ExitProcess on a thread without a TLS array.
+    static State& Instance() { return LeakedInstance<State>::Get(); }
+
+    // nullptr until the first Instance() call; safe on any thread
+    static State* Existing() { return LeakedInstance<State>::Existing(); }
 
     std::string gameExe;
     std::string gameName;
@@ -479,6 +480,7 @@ class State
     inline static bool _serveOriginal = false;
     inline static UINT _serveOwner = 0;
 
+    friend class LeakedInstance<State>;
     State() = default;
 };
 
