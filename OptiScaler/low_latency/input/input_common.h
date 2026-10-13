@@ -158,8 +158,12 @@ class InputCommon
 
     static InputResult mark_present_start(IUnknown* pDevice);
 
-    // Called on every present: Force State and OptiScaler's FPS limit for the active output. The Reflex output is
-    // limited through the Reflex hooks.
+    // Stops the output; the next call of the active input starts it again. `release` false lets go of it without a call
+    // to its device, for a device that is gone.
+    static void stop_output(bool release = true);
+
+    // Meant for every present (only with LOW_LATENCY_INPUTS for now, nothing calls it otherwise): Force State and
+    // OptiScaler's FPS limit for the active output. The Reflex output is limited through the Reflex hooks.
     static void update();
     static bool can_limit_fps() { return limits_fps; }
 

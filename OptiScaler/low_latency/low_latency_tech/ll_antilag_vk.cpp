@@ -13,7 +13,9 @@ void* AntiLagVk::get_tech_context() { return nullptr; }
 
 void AntiLagVk::update(VkAntiLagStageAMD stage, std::optional<uint64_t> frame_id)
 {
-    if (device == VK_NULL_HANDLE || VulkanHooks::o_vkAntiLagUpdateAMD == nullptr)
+    const VkDevice target = device.load();
+
+    if (target == VK_NULL_HANDLE || VulkanHooks::o_vkAntiLagUpdateAMD == nullptr)
         return;
 
     VkAntiLagPresentationInfoAMD presentationInfo = {};
@@ -32,7 +34,7 @@ void AntiLagVk::update(VkAntiLagStageAMD stage, std::optional<uint64_t> frame_id
     LOG_TRACE_LOWLATENCY("AntiLag {}: {}, status: {}", stage == VK_ANTI_LAG_STAGE_INPUT_AMD ? "Input" : "Present",
                          frame_id.value_or(0), is_enabled());
 
-    VulkanHooks::o_vkAntiLagUpdateAMD(device, &antiLagData);
+    VulkanHooks::o_vkAntiLagUpdateAMD(target, &antiLagData);
 }
 
 void AntiLagVk::get_sleep_status(SleepParams* sleep_params)
@@ -67,9 +69,9 @@ void AntiLagVk::sleep(std::optional<uint32_t> frame_id)
         return;
     }
 
-    // The simulation start markers with frame ids are better
-    if (++sleeps_since_id_marker > 20)
-        update(VK_ANTI_LAG_STAGE_INPUT_AMD, std::nullopt);
+    // Without one the input stage stays on the simulation start markers, which bring their device. A sleep brings none,
+    // and the one kept from an earlier marker can be gone (a recreated VkDevice). Upstream updates here after 20 sleeps
+    // without such a marker; left out until an AMD Vulkan run.
 }
 
 void AntiLagVk::set_marker(IUnknown* pDevice, const MarkerParams& marker_params)
@@ -94,8 +96,6 @@ void AntiLagVk::set_marker(IUnknown* pDevice, const MarkerParams& marker_params)
 
     if (marker_params.marker_type == MarkerType::SIMULATION_START)
     {
-        sleeps_since_id_marker = 0;
-
         if (!last_input_frame_id.has_value() || (uint32_t) *last_input_frame_id != (uint32_t) marker_params.frame_id)
         {
             last_input_frame_id = marker_params.frame_id;

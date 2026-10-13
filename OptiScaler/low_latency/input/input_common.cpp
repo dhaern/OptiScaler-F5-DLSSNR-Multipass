@@ -1,8 +1,7 @@
 #include "pch.h"
 
-// Upstream's low latency input layer, absorbed in phases (.ai-os plan 2026-10-14-absorb-upstream-low-latency). Without
-// LOW_LATENCY_INPUTS only the UE Low Latency mod is an input (input_uell.cpp): the game's Reflex and XeLL stay on
-// our own hooks, and there is no Vulkan Reflex output yet.
+// Upstream's low latency input layer. Without LOW_LATENCY_INPUTS the UE Low Latency mod is its only input
+// (input_uell.cpp): the game's Reflex and XeLL stay on our own hooks, and there is no Vulkan Reflex output yet.
 
 #include <misc/IdentifyGpu.h>
 
@@ -481,11 +480,20 @@ bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optio
 
     desiredMode = for_api(desiredMode, api);
 
+#ifdef LOW_LATENCY_INPUTS
     // XeLL needs all six markers every frame (Intel R9): an input that can't send them (the UE mod's simulation
     // markers) gets LatencyFlex instead of a XeLL fed half its frame
     if (!forced.has_value() && desiredMode == LowLatencyMode::XeLL &&
         incompatibility(activeInput, desiredMode) != nullptr)
+    {
         desiredMode = LowLatencyMode::LatencyFlex;
+    }
+#else
+    // Without the inputs XeFG's XeLL is fakenvapi's, and the hooked libxell knows one context of ours: a second XeLL
+    // here would take its place. The UE mod, the only input then, can't feed XeLL anyway (simulation markers only).
+    if (desiredMode == LowLatencyMode::XeLL)
+        desiredMode = LowLatencyMode::LatencyFlex;
+#endif
 
     // XeFG paces with the XeLL output's own context, which stays the output until XeFG lets go of it
     if (xefg_uses_output_xell && activeOutput == LowLatencyMode::XeLL && desiredMode != LowLatencyMode::XeLL)
@@ -610,6 +618,28 @@ void InputCommon::add_marker_to_report(const MarkerParams& marker_params)
 }
 
 // public
+void InputCommon::stop_output(bool release)
+{
+    std::scoped_lock lock(create_tech_mutex);
+
+    auto old_tech = currently_active_tech.exchange(nullptr);
+
+    if (old_tech == nullptr)
+        return;
+
+    while (old_tech.use_count() > 1)
+        std::this_thread::yield();
+
+    if (release)
+        old_tech->deinit();
+
+    LOG_INFO("Low latency output {} stopped{}", magic_enum::enum_name(activeOutput), release ? "" : " (device gone)");
+
+    std::memset(frame_reports, 0, sizeof(frame_reports));
+    activeOutput = LowLatencyMode::None;
+    output_api = API::NotSelected;
+}
+
 InputResult InputCommon::set_low_latency_tech(IUnknown* pDevice, LowLatencyMode mode)
 {
     if (!update_low_latency_tech(pDevice, API::DX12, mode))

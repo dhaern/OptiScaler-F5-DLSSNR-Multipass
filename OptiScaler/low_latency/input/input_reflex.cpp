@@ -1,6 +1,6 @@
 #include "pch.h"
 
-// Upstream's low latency input layer, absorbed in phases (.ai-os plan 2026-10-14-absorb-upstream-low-latency): built once LOW_LATENCY_INPUTS is on.
+// Upstream's low latency input layer: built only with LOW_LATENCY_INPUTS, which is not on yet.
 #ifdef LOW_LATENCY_INPUTS
 #include "input_reflex.h"
 #include <nvapi/NvApiHooks.h>

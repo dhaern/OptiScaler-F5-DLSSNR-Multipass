@@ -7,11 +7,11 @@
 class AntiLagVk : public LowLatencyTech
 {
   private:
-    VkDevice device = VK_NULL_HANDLE;
+    // Set by the markers (render thread), read by any update
+    std::atomic<VkDevice> device = VK_NULL_HANDLE;
     uint32_t max_fps = 0;
 
-    // The input stage goes on simulation start markers with frame ids, without them on the sleep calls
-    uint32_t sleeps_since_id_marker = UINT32_MAX / 2;
+    // The input stage goes on simulation start markers with frame ids
     std::optional<uint64_t> last_input_frame_id;
 
     // Out of band presents are the ones that reach the screen with frame generation

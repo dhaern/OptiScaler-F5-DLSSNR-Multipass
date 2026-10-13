@@ -10,57 +10,59 @@
 
 using namespace DirectX;
 
-// The output keeps what it has while the mod stands aside: stopping Reflex would send low latency off under the one
-// that runs
-static bool StandAside()
+static const char* OwnerText(ueinput::Owner owner)
 {
-    const bool aside = ueinput::StandAside(ReflexHooks::gameCalledReflex(), native::lowlatency::Running());
-
-    static std::atomic_bool wasAside = false;
-
-    if (wasAside.exchange(aside) != aside)
+    switch (owner)
     {
-        if (aside)
-            LOG_INFO("UE Low Latency mod: stands aside, the game's Reflex or OptiScaler's own low latency runs");
-        else
-            LOG_INFO("UE Low Latency mod: its frames drive the low latency output again");
+    case ueinput::Owner::Game:
+        return "stands aside, the game's own Reflex lowers latency";
+    case ueinput::Owner::OwnLowLatency:
+        return "stands aside, OptiScaler's own low latency runs";
+    case ueinput::Owner::FrameGeneration:
+        return "stands aside, the frame generation output runs its own low latency";
+    default:
+        return "its frames drive the low latency output";
     }
-
-    return aside;
-}
-
-void InputUeLowLatency::init()
-{
-    if (inited)
-        return;
-
-    // The swapchain's device, D3D11 games can have a D3D12 device too
-    if (State::Instance().swapchainApi == DX11)
-        device = State::Instance().currentD3D11Device;
-    else
-        device = State::Instance().currentD3D12Device;
-
-    inited = device != nullptr;
-
-    if (inited)
-        LOG_DEBUG("Inited UeLowLatency");
 }
 
 void InputUeLowLatency::tickStart(int64_t frameId, float DeltaSeconds, bool bIdleMode)
 {
-    if (!inited)
-        InputUeLowLatency::init();
+    auto& state = State::Instance();
 
-    if (!inited || StandAside())
+    // The swap chain's device, taken every frame: the game can make a new one. D3D11 games can have a D3D12 device too.
+    IUnknown* device = nullptr;
+
+    if (state.swapchainApi == DX11)
+        device = state.currentD3D11Device;
+    else if (state.swapchainApi == DX12)
+        device = state.currentD3D12Device;
+
+    const auto owner =
+        ueinput::OtherOwner(ReflexHooks::gameCalledReflex(), native::lowlatency::Running(),
+                            native::lowlatency::FrameGenerationNeedsReflex() || state.activeFgOutput == FGOutput::XeFG);
+
+    const auto previousOwner = memory.owner;
+    const auto step = ueinput::Next(memory, device, owner, InputCommon::active_output() == LowLatencyMode::Reflex,
+                                    native::lowlatency::GameLowLatencyBlocked());
+
+    if (owner != previousOwner)
+        LOG_INFO("UE Low Latency mod: {}", OwnerText(owner));
+
+    if (step.dropOutput || step.stopOutput)
+        InputCommon::stop_output(!step.dropOutput);
+
+    // The frame's end marker follows its start
+    drivenFrame = step.drive ? frameId : INT64_MIN;
+
+    if (!step.drive)
         return;
 
-    if (auto lowLatency = ueinput::SleepModeToSend(native::lowlatency::GameLowLatencyBlocked(), sentLowLatency))
+    if (step.sleepMode.has_value())
     {
         // No interval: the frame cap stays with OptiScaler's limiter. InputCommon keeps the mode even when it fails,
         // for an output that starts later.
         SleepMode sleepMode {};
-        sleepMode.low_latency_enabled = *lowLatency;
-        sentLowLatency = *lowLatency;
+        sleepMode.low_latency_enabled = *step.sleepMode;
 
         if (auto result = InputCommon::set_sleep_mode(inputContext, device, &sleepMode);
             result != InputResult::Ok && result != InputResult::UsingDifferentInput)
@@ -96,14 +98,15 @@ void InputUeLowLatency::tickStart(int64_t frameId, float DeltaSeconds, bool bIdl
 
 void InputUeLowLatency::tickEnd(int64_t frameId, float DeltaSeconds, bool bIdleMode)
 {
-    if (!inited || StandAside())
+    // Only for a frame whose start went to the output
+    if (drivenFrame != frameId)
         return;
 
     MarkerParams markerParams {};
     markerParams.frame_id = frameId;
     markerParams.marker_type = MarkerType::SIMULATION_END;
 
-    auto result = InputCommon::set_marker(inputContext, device, markerParams);
+    auto result = InputCommon::set_marker(inputContext, (IUnknown*) memory.device, markerParams);
 
     if (result != InputResult::Ok)
     {

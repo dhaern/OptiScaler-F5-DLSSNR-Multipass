@@ -19,12 +19,6 @@ typedef decltype(&VerQueryValueW) PFN_VerQueryValueW;
 
 static IID streamlineRiid {};
 
-/// <summary>
-/// Returns caller module filename
-/// Don't forget to add #pragma intrinsic(_ReturnAddress)
-/// </summary>
-/// <param name="returnAddress">Use _ReturnAddress() for this</param>
-/// <returns>Caller module filename</returns>
 uint64_t Util::GetTimestamp()
 {
     FILETIME fileTime;
@@ -35,6 +29,12 @@ uint64_t Util::GetTimestamp()
     return time * 100;
 }
 
+/// <summary>
+/// Returns caller module filename
+/// Don't forget to add #pragma intrinsic(_ReturnAddress)
+/// </summary>
+/// <param name="returnAddress">Use _ReturnAddress() for this</param>
+/// <returns>Caller module filename</returns>
 std::string Util::WhoIsTheCaller(void* returnAddress)
 {
     char callerPath[MAX_PATH] = { 0 };
