@@ -110,11 +110,11 @@ struct Backup
     ID3D12Resource* readback = nullptr;                 // the same copy in CPU-readable memory, for the on-screen preview
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};    // where the first plane sits in it
     UINT64 readbackBytes = 0;                           // its size: the last row is not padded to RowPitch
-    // A multisampled buffer. Standard sample patterns (quality 0): the game's list resolves it to its nearest sample
-    // straight into a single-sample slot of the same format family (native/DepthSnapshotDx12.h), so the copies are read
-    // like a single-sample buffer's. Other patterns: the list copies it as it is into a multisampled slot of this
-    // family and these samples, and the resolve (native/DepthResolveDx12) turns that into the R32 copy described above
-    // (typeless R32_TYPELESS, view R32_FLOAT).
+    // A multisampled buffer. On a device that can resolve a region (DepthResolveSupported) and a buffer with quality 0
+    // or the standard pattern: the game's list resolves it to its nearest sample straight into a single-sample slot of
+    // the same format family (native/DepthSnapshotDx12.h), so the copies are read like a single-sample buffer's.
+    // Otherwise: the list copies it as it is into a multisampled slot of this family and these samples, and the resolve
+    // (native/DepthResolveDx12) turns that into the R32 copy described above (typeless R32_TYPELESS, view R32_FLOAT).
     DXGI_SAMPLE_DESC samples { 1, 0 };
     bool resolveInList = false;
     DXGI_FORMAT multisampledTypeless = DXGI_FORMAT_UNKNOWN;
@@ -208,11 +208,25 @@ bool BackupFormats(DXGI_FORMAT depth, DXGI_FORMAT* typeless, DXGI_FORMAT* view)
 // frames (the menu or the motion step may still be reading them), and makes the preview's readback.
 bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_FORMAT typeless, DXGI_FORMAT view)
 {
-    // A multisampled buffer with a standard pattern is resolved in the game's list into its own format family. Any
-    // other is copied as it is and resolved into R32 afterwards: that is then the format of the copies read and of the
-    // readback.
+    // A multisampled buffer is resolved in the game's list into its own format family when the device can and the
+    // pattern is quality 0 or the standard one (MIN/MAX does not depend on where the samples are). Any other is copied
+    // as it is and resolved into R32 afterwards: that is then the format of the copies read and of the readback.
+    static ID3D12Device* checkedDevice = nullptr;
+    static bool deviceResolves = false;
+
+    if (device != checkedDevice)
+    {
+        checkedDevice = device;
+        deviceResolves = native::DepthResolveSupported(device);
+        LOG_INFO("Depth finder: multisampled depth is {}",
+                 deviceResolves ? "resolved in the game's lists"
+                                : "copied and resolved afterwards (no programmable sample positions tier 1)");
+    }
+
     const bool multisampled = source.SampleDesc.Count > 1;
-    const bool resolveInList = multisampled && source.SampleDesc.Quality == 0;
+    const bool standardPattern =
+        source.SampleDesc.Quality == 0 || source.SampleDesc.Quality == D3D12_STANDARD_MULTISAMPLE_PATTERN;
+    const bool resolveInList = multisampled && standardPattern && deviceResolves;
     const bool resolveLater = multisampled && !resolveInList;
     const DXGI_FORMAT multisampledTypeless = resolveLater ? typeless : DXGI_FORMAT_UNKNOWN;
     const DXGI_FORMAT multisampledView = resolveLater ? view : DXGI_FORMAT_UNKNOWN;
@@ -616,11 +630,8 @@ void TakeSnapshot(ID3D12GraphicsCommandList* list, const native::SnapshotRequest
     if (!request.take)
         return;
 
-    // The pick's direction, read before taking g_mutex: it decides which sample a resolve keeps
-    const bool reversed = g_core.CurrentPick().reversed;
-
     std::lock_guard lock(g_mutex);
-    RecordSnapshot(list, (ID3D12Resource*) (size_t) request.id, request.readOnlyDepth, reversed, request.where,
+    RecordSnapshot(list, (ID3D12Resource*) (size_t) request.id, request.readOnlyDepth, request.reversed, request.where,
                    request.stretchVertices);
 }
 

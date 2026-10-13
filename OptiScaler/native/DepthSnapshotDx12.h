@@ -16,6 +16,19 @@
 namespace native
 {
 
+// Whether `device` may record ResolveSubresourceRegion: the spec ties it to programmable sample positions tier 1 and
+// removes a device without it that calls it. Translation layers report tier 0 when they cannot do a depth MIN/MAX
+// resolve (vkd3d-proton records nothing then, with no error to the caller), so this is also what keeps them on the copy
+// path.
+inline bool DepthResolveSupported(ID3D12Device* device)
+{
+    D3D12_FEATURE_DATA_D3D12_OPTIONS2 options {};
+
+    return device != nullptr &&
+           SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options, sizeof(options))) &&
+           options.ProgrammableSamplePositionsTier >= D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_1;
+}
+
 // Records barriers to the resolve states, the resolve and barriers back into `list`. Nothing else is recorded: no
 // pipeline, root signature, heap or render target change. Returns nullptr when recorded, else why it was not.
 inline const char* RecordDepthResolve(ID3D12GraphicsCommandList* list, ID3D12Resource* source,

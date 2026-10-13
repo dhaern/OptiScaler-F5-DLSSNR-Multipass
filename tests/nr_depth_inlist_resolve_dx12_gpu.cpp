@@ -2,17 +2,18 @@
 // into the game's own command list (ResolveSubresourceRegion MIN/MAX into a single-sample slot), no game. A
 // multisampled depth buffer is cleared to 0.25 and a triangle at 0.75 is drawn over its upper-left half, so the pixels
 // along the diagonal hold both depths. For D32, D32S8, D24S8 and D16, with 2, 4 and 8 samples where the device has
-// them, reversed and standard Z:
-//   - the slot, made as GenericDepth_Dx12 makes it (the buffer's typeless family, single-sample, resting readable) and
-//   read
-//     back the way the menu's preview reads it (footprint of subresource 0, decoded per family), equals pixel for pixel
-//     the compute resolve the finder used before (native/DepthResolveDx12, the reference),
-//   - the same with the game's buffer made DENY_SHADER_RESOURCE, as many games make their depth buffers,
-//   - the source and the slot are left in the states they were in,
-//   - two lists over one buffer, each taking its own stretch into its own slot, executed in both orders: each slot
-//   holds
-//     its own stretch (no dependence on recording or execution order between lists),
-//   - with the debug layer installed, the runtime reports no error or warning.
+// them, quality 0 and the standard pattern, reversed and standard Z:
+//  - the slot, made as GenericDepth_Dx12 makes it (the buffer's typeless family, single-sample, resting readable) and
+//    read back the way the menu's preview reads it (footprint of subresource 0, decoded per family), equals pixel for
+//    pixel the compute resolve the finder used before (native/DepthResolveDx12, the reference),
+//  - the same with the game's buffer made DENY_SHADER_RESOURCE, as many games make their depth buffers,
+//  - the source and the slot are left in the states they were in,
+//  - two lists over one buffer, each taking its own stretch into its own slot, executed in both orders: each slot
+//    holds its own stretch (no dependence on recording or execution order between lists),
+//  - with the debug layer installed, the runtime reports no error or warning.
+// A device without programmable sample positions tier 1 must not resolve a region (the spec removes it; vkd3d-proton
+// reports tier 0 and records nothing): there the test only checks that native::DepthResolveSupported says no, which
+// is what keeps GenericDepth_Dx12 on the copy path.
 // Run on the hardware adapter and on WARP (argument "warp").
 //
 //   vcvars64, then from the repo root:
@@ -165,7 +166,7 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES befor
 }
 
 ComPtr<ID3D12Resource> Texture(Gpu& g, DXGI_FORMAT format, UINT samples, D3D12_RESOURCE_FLAGS flags,
-                               D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear)
+                               D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, UINT quality = 0)
 {
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -177,6 +178,7 @@ ComPtr<ID3D12Resource> Texture(Gpu& g, DXGI_FORMAT format, UINT samples, D3D12_R
     desc.MipLevels = 1;
     desc.Format = format;
     desc.SampleDesc.Count = samples;
+    desc.SampleDesc.Quality = quality;
     desc.Flags = flags;
     ComPtr<ID3D12Resource> tex;
     g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, clear, IID_PPV_ARGS(&tex));
@@ -192,7 +194,8 @@ struct GameDepth
     D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
 };
 
-bool MakeGameDepth(Gpu& g, GameDepth& d, DXGI_FORMAT typeless, DXGI_FORMAT dsvFormat, UINT samples, bool deny)
+bool MakeGameDepth(Gpu& g, GameDepth& d, DXGI_FORMAT typeless, DXGI_FORMAT dsvFormat, UINT samples, bool deny,
+                   UINT quality = 0)
 {
     D3D12_CLEAR_VALUE clear {};
     clear.Format = dsvFormat;
@@ -202,7 +205,7 @@ bool MakeGameDepth(Gpu& g, GameDepth& d, DXGI_FORMAT typeless, DXGI_FORMAT dsvFo
     if (deny)
         flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
-    d.resource = Texture(g, typeless, samples, flags, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
+    d.resource = Texture(g, typeless, samples, flags, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear, quality);
 
     if (d.resource == nullptr)
         return false;
@@ -231,6 +234,7 @@ bool MakeGameDepth(Gpu& g, GameDepth& d, DXGI_FORMAT typeless, DXGI_FORMAT dsvFo
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.DSVFormat = dsvFormat;
     pso.SampleDesc.Count = samples;
+    pso.SampleDesc.Quality = quality;
     return SUCCEEDED(g.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.pso)));
 }
 
@@ -433,68 +437,73 @@ void Matrix(Gpu& g)
                 continue;
             }
 
-            for (bool reversed : { true, false })
-            {
-                char what[256];
-                const char* dir = reversed ? "reversed" : "standard";
-
-                // Reference: the compute resolve of the buffer itself (the finder's previous path, minus its copy)
-                GameDepth depth;
-
-                if (!MakeGameDepth(g, depth, f.typeless, f.dsv, samples, false))
+            for (UINT quality : { 0u, (UINT) D3D12_STANDARD_MULTISAMPLE_PATTERN })
+                for (bool reversed : { true, false })
                 {
-                    std::snprintf(what, sizeof(what), "%s %ux %s: test buffer made", f.name, samples, dir);
-                    Check(false, what);
-                    continue;
-                }
+                    char what[256];
+                    const char* dir = reversed ? "reversed" : "standard";
+                    const char* pattern = quality == 0 ? "" : " standard-pattern";
 
-                Draw(g, g.list.Get(), depth, 0.25f, 0.75f, 0);
-                const auto toRead = Transition(depth.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, kRest);
-                g.list->ResourceBarrier(1, &toRead);
-                g.Submit();
+                    // Reference: the compute resolve of the buffer itself (the finder's previous path, minus its copy)
+                    GameDepth depth;
 
-                auto r32 =
-                    Texture(g, DXGI_FORMAT_R32_TYPELESS, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, kRest, nullptr);
-                const native::DepthResolveDx12::Job job { depth.resource.Get(), f.view, r32.Get() };
-                const char* refFailed = reference.Run(g.queue.Get(), &job, 1, reversed, kRest);
-                g.Wait();
-                const auto expected =
-                    refFailed == nullptr ? Read(g, r32.Get(), DXGI_FORMAT_R32_TYPELESS) : std::vector<float> {};
-
-                // In the list, from DEPTH_WRITE as a game's list leaves it bound, on a fresh buffer of each kind
-                for (bool deny : { false, true })
-                {
-                    GameDepth game;
-
-                    if (!MakeGameDepth(g, game, f.typeless, f.dsv, samples, deny))
+                    if (!MakeGameDepth(g, depth, f.typeless, f.dsv, samples, false, quality))
+                    {
+                        std::snprintf(what, sizeof(what), "%s %ux%s %s: test buffer made", f.name, samples, pattern,
+                                      dir);
+                        Check(false, what);
                         continue;
+                    }
 
-                    auto slot = Slot(g, f.typeless);
-                    Draw(g, g.list.Get(), game, 0.25f, 0.75f, 0);
-                    const char* failed =
-                        native::RecordDepthResolve(g.list.Get(), game.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                                                   slot.Get(), kRest, f.view, reversed);
-                    // Back where the source was: one more barrier from DEPTH_WRITE is legal only if it is there
-                    const auto after = Transition(game.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                                                  D3D12_RESOURCE_STATE_DEPTH_READ);
-                    g.list->ResourceBarrier(1, &after);
+                    Draw(g, g.list.Get(), depth, 0.25f, 0.75f, 0);
+                    const auto toRead = Transition(depth.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, kRest);
+                    g.list->ResourceBarrier(1, &toRead);
                     g.Submit();
 
-                    const auto got = Read(g, slot.Get(), f.typeless);
-                    int differ = 0;
-                    const float worst = Compare(got, expected, f.step, &differ);
-                    const int nearValue = Count(got, reversed ? 0.75f : 0.25f, f.step);
-                    const int messages = DebugMessages(g);
+                    auto r32 = Texture(g, DXGI_FORMAT_R32_TYPELESS, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                       kRest, nullptr);
+                    const native::DepthResolveDx12::Job job { depth.resource.Get(), f.view, r32.Get() };
+                    const char* refFailed = reference.Run(g.queue.Get(), &job, 1, reversed, kRest);
+                    g.Wait();
+                    const auto expected =
+                        refFailed == nullptr ? Read(g, r32.Get(), DXGI_FORMAT_R32_TYPELESS) : std::vector<float> {};
 
-                    std::snprintf(what, sizeof(what),
-                                  "%s %ux %s%s: same as the compute resolve (%d pixels differ, worst %.3g), %d nearest "
-                                  "pixels, %d debug messages",
-                                  f.name, samples, dir, deny ? " DENY_SHADER_RESOURCE" : "", differ, worst, nearValue,
-                                  messages);
-                    Check(failed == nullptr && refFailed == nullptr && differ == 0 && nearValue > 0 && messages == 0,
-                          what);
+                    // In the list, from DEPTH_WRITE as a game's list leaves it bound, on a fresh buffer of each kind
+                    for (bool deny : { false, true })
+                    {
+                        GameDepth game;
+
+                        if (!MakeGameDepth(g, game, f.typeless, f.dsv, samples, deny, quality))
+                            continue;
+
+                        auto slot = Slot(g, f.typeless);
+                        Draw(g, g.list.Get(), game, 0.25f, 0.75f, 0);
+                        const char* failed = native::RecordDepthResolve(g.list.Get(), game.resource.Get(),
+                                                                        D3D12_RESOURCE_STATE_DEPTH_WRITE, slot.Get(),
+                                                                        kRest, f.view, reversed);
+                        // Back where the source was: one more barrier from DEPTH_WRITE is legal only if it is there
+                        const auto after = Transition(game.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                                      D3D12_RESOURCE_STATE_DEPTH_READ);
+                        g.list->ResourceBarrier(1, &after);
+                        g.Submit();
+
+                        const auto got = Read(g, slot.Get(), f.typeless);
+                        int differ = 0;
+                        const float worst = Compare(got, expected, f.step, &differ);
+                        const int nearValue = Count(got, reversed ? 0.75f : 0.25f, f.step);
+                        const int messages = DebugMessages(g);
+
+                        std::snprintf(
+                            what, sizeof(what),
+                            "%s %ux%s %s%s: same as the compute resolve (%d pixels differ, worst %.3g), %d nearest "
+                            "pixels, %d debug messages",
+                            f.name, samples, pattern, dir, deny ? " DENY_SHADER_RESOURCE" : "", differ, worst,
+                            nearValue, messages);
+                        Check(failed == nullptr && refFailed == nullptr && differ == 0 && nearValue > 0 &&
+                                  messages == 0,
+                              what);
+                    }
                 }
-            }
         }
     }
 
@@ -574,6 +583,19 @@ int main(int argc, char** argv)
     std::printf("%s, debug layer: %s\n", warp ? "WARP" : "hardware adapter",
                 g.info != nullptr ? "on" : "not installed (its check is skipped)");
 
+    D3D12_FEATURE_DATA_D3D12_OPTIONS2 options {};
+    g.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options, sizeof(options));
+    std::printf("programmable sample positions tier %d\n", (int) options.ProgrammableSamplePositionsTier);
+
+    if (!native::DepthResolveSupported(g.device.Get()))
+    {
+        Check(options.ProgrammableSamplePositionsTier == D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED,
+              "no tier 1: DepthResolveSupported says no, so the finder keeps the copy and compute resolve");
+        std::printf("%s (%d failed)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
+
+    Check(true, "tier 1 or higher: DepthResolveSupported says yes");
     Matrix(g);
     Order(g);
     Check(DebugMessages(g) == 0, "the debug layer reported nothing at the end");
