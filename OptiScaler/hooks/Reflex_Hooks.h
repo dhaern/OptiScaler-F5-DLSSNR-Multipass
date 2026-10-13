@@ -7,6 +7,7 @@
 #include "Hook_Utils.h"
 #include "low_latency/ll_util.h"
 #include <native/XefgReflexRule.h>
+#include <low_latency/input/RoutedInputRule.h>
 
 enum TimingType : uint32_t
 {
@@ -93,8 +94,9 @@ class ReflexHooks
     // The game's own Reflex calls versus OptiScaler's (ownSetSleepMode and friends, Optical F5Low's low latency): ours
     // go through the same wrappers, so they take the same routing, but they are not "the game sends markers".
     inline static thread_local bool _ownCall = false;
-    // Set by route*: the D3D call InputReflex hands over is the game's (its caller told apart there)
-    inline static thread_local bool _routedGameCall = false;
+    // Set by route*: whether the D3D call InputReflex handed over is the game's (its caller told apart there), and how
+    // deep the router is nested on this thread
+    inline static thread_local routedinput::RoutedCall _routedCall {};
     inline static std::atomic<bool> _gameCalledReflex = false;
     inline static std::atomic<bool> _timingEstimated = false;
     inline static std::atomic<bool> _gameCalledSetSleepMode = false;
@@ -161,6 +163,8 @@ class ReflexHooks
     static NvAPI_Status routeSetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER_PARAMS* pParams, bool game);
     static NvAPI_Status routeSetAsyncFrameMarker(ID3D12CommandQueue* pQueue, NV_ASYNC_FRAME_MARKER_PARAMS* pParams,
                                                  bool game);
+    // The router is running a call on this thread: a Reflex call that comes in now is made from inside it
+    static bool inRoutedCall() { return _routedCall.depth > 0; }
     // The last timings came from fakenvapi (XeFG's XeLL, or fakenvapi as the nvapi): its report has no GPU, driver or
     // queue times, only the markers' own
     static bool timingEstimated() { return _timingEstimated.load(std::memory_order_relaxed); }

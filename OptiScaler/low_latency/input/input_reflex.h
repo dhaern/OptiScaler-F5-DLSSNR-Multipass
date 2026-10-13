@@ -3,7 +3,9 @@
 #include <nvapi/NvApiTypes.h>
 #include "input_common.h"
 
+#ifdef LOW_LATENCY_INPUTS
 #include <vulkan/vulkan.h>
+#endif
 
 // The game's Reflex as a low latency input. The D3D calls that reach the nvapi hooks come in here: the game's own are
 // told apart from OptiScaler's Streamline (DLSS frame generation output), InputCommon learns the Reflex input from them

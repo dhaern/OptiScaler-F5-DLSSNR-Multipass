@@ -1,7 +1,8 @@
 #include "pch.h"
 
-// Upstream's low latency input layer. Without LOW_LATENCY_INPUTS the UE Low Latency mod is its only input
-// (input_uell.cpp): the game's Reflex and XeLL stay on our own hooks, and there is no Vulkan Reflex output yet.
+// Upstream's low latency input layer. Without LOW_LATENCY_INPUTS its inputs are the UE Low Latency mod (input_uell.cpp)
+// and the game's D3D Reflex, which ReflexHooks' router still delivers (input_reflex.cpp, RoutedInputRule.h). The
+// game's XeLL and Vulkan Reflex stay on our own hooks, and there is no Vulkan Reflex output yet.
 
 #include <misc/IdentifyGpu.h>
 
@@ -20,6 +21,7 @@
 #endif
 #include <framegen/IFGFeature_Dx12.h>
 #include <nvapi/fakenvapi.h>
+#include "RoutedInputRule.h"
 
 #include <deque>
 
@@ -364,7 +366,14 @@ std::optional<LowLatencyInput> InputCommon::forced_input()
     return std::nullopt;
 }
 
-bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optional<LowLatencyMode> mode)
+bool InputCommon::update_for_call(const InputContext& inputContext, IUnknown* pDevice)
+{
+    return update_low_latency_tech(pDevice, register_call(inputContext, pDevice), std::nullopt,
+                                   routed_input(inputContext.caller));
+}
+
+bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optional<LowLatencyMode> mode,
+                                          bool callerRouted)
 {
     // The game's XeFG runs on its own XeLL, nothing else may drive an output next to it (update() removes it)
     if (InputXeLL::IsNative())
@@ -440,19 +449,23 @@ bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optio
         for (auto& id : last_marker_frame_ids)
             id = 0;
 
-        if (auto current_tech = currently_active_tech.load())
-            apply_sleep_mode(current_tech.get()); // Restore any potential sleep mode
+        // Restore any potential sleep mode. Not for an input the router delivers: the output stops below.
+        if (!routed_input(activeInput))
+        {
+            if (auto current_tech = currently_active_tech.load())
+                apply_sleep_mode(current_tech.get());
+        }
     }
 
-    // The game's Reflex is delivered by ReflexHooks' router (routed_input): an output another input started (the UE
-    // mod's) stops, and none starts while it is the active input
-    if (routed_input(activeInput) && !mode.has_value())
-    {
-        if (currently_active_tech.load() != nullptr)
-            stop_output();
+    // The game's Reflex is delivered by ReflexHooks' router (RoutedInputRule.h ForCall): while it is the active input
+    // an output another input started (the UE mod's) stops, and its calls never start one
+    const auto step = routedinput::ForCall(routed_input(activeInput), callerRouted, mode.has_value());
 
+    if (step.stopOutput && currently_active_tech.load() != nullptr)
+        stop_output();
+
+    if (!step.mayStart)
         return true;
-    }
 
     // The output runs on the active input's device, another API's device can't start it. OptiScaler's frame
     // generation asks for its output with its own device.
@@ -500,7 +513,8 @@ bool InputCommon::update_low_latency_tech(IUnknown* pDevice, API api, std::optio
     }
 #else
     // Without the inputs XeFG's XeLL is fakenvapi's, and the hooked libxell knows one context of ours: a second XeLL
-    // here would take its place. The UE mod, the only input then, can't feed XeLL anyway (simulation markers only).
+    // here would take its place. The UE mod, the only input with an output here then, can't feed XeLL anyway
+    // (simulation markers only).
     if (desiredMode == LowLatencyMode::XeLL)
         desiredMode = LowLatencyMode::LatencyFlex;
 #endif
@@ -660,13 +674,17 @@ InputResult InputCommon::set_low_latency_tech(IUnknown* pDevice, LowLatencyMode 
 
 InputResult InputCommon::sleep(const InputContext& inputContext, IUnknown* pDevice, std::optional<uint32_t> frame_id)
 {
-    if (!update_low_latency_tech(pDevice, register_call(inputContext, pDevice)))
+    if (!update_for_call(inputContext, pDevice))
         return InputResult::LowLatencyUpdateFail;
 
     if (inputContext.caller != activeInput)
         return InputResult::UsingDifferentInput;
 
     presents_without_input = 0;
+
+    // The router slept for it; an output that has not stopped yet (another input's, made at the same time) gets nothing
+    if (routed_input(inputContext.caller))
+        return InputResult::Ok;
 
     if (auto current_tech = currently_active_tech.load())
         current_tech->sleep(frame_id);
@@ -679,7 +697,7 @@ InputResult InputCommon::sleep(const InputContext& inputContext, IUnknown* pDevi
 InputResult InputCommon::set_marker(const InputContext& inputContext, IUnknown* pDevice,
                                     const MarkerParams& marker_params, bool toOutput)
 {
-    if (!update_low_latency_tech(pDevice, register_call(inputContext, pDevice)))
+    if (!update_for_call(inputContext, pDevice))
         return InputResult::LowLatencyUpdateFail;
 
     if (inputContext.caller != activeInput)
@@ -702,16 +720,17 @@ InputResult InputCommon::set_marker(const InputContext& inputContext, IUnknown* 
     if (marker_params.marker_type == MarkerType::PRESENT_START)
         last_present_start_frame_id = marker_params.frame_id;
 
-    // Without frame ids there's nothing to report, the overlay's timings need them
+    // Without frame ids there's nothing to report, the overlay's timings need them. The router keeps the frame id of an
+    // input it delivers.
     if (!inputContext.noFrameId)
     {
-        if (marker_params.marker_type == MarkerType::SIMULATION_START)
+        if (marker_params.marker_type == MarkerType::SIMULATION_START && !routed_input(inputContext.caller))
             State::Instance().reflexFrameId = marker_params.frame_id;
 
         add_marker_to_report(marker_params);
     }
 
-    if (!toOutput)
+    if (!toOutput || routed_input(inputContext.caller))
         return InputResult::Ok;
 
     // XeFG's own XeLL context follows the game's frames while a Reflex or AntiLag 2 output sleeps
@@ -790,11 +809,15 @@ InputResult InputCommon::set_sleep_mode(const InputContext& inputContext, IUnkno
     if (!inputContext.localContext)
         get_sleep_copy(inputContext.caller) = *sleep_mode;
 
-    if (!update_low_latency_tech(pDevice, register_call(inputContext, pDevice)))
+    if (!update_for_call(inputContext, pDevice))
         return InputResult::LowLatencyUpdateFail;
 
     if (inputContext.caller != activeInput)
         return InputResult::UsingDifferentInput;
+
+    // The router set it
+    if (routed_input(inputContext.caller))
+        return InputResult::Ok;
 
     if (auto current_tech = currently_active_tech.load())
         apply_sleep_mode(current_tech.get());
@@ -807,7 +830,7 @@ InputResult InputCommon::set_sleep_mode(const InputContext& inputContext, IUnkno
 InputResult InputCommon::get_sleep_status(const InputContext& inputContext, IUnknown* pDevice,
                                           SleepParams* sleep_params)
 {
-    if (!update_low_latency_tech(pDevice, register_call(inputContext, pDevice)))
+    if (!update_for_call(inputContext, pDevice))
         return InputResult::LowLatencyUpdateFail;
 
     // Get functions don't really need to worry about this check
@@ -827,7 +850,7 @@ InputResult InputCommon::get_latency(const InputContext& inputContext, IUnknown*
     // if (inputContext.caller != activeInput)
     //     return InputResult::UsingDifferentInput;
 
-    if (!update_low_latency_tech(pDev, register_call(inputContext, pDev)))
+    if (!update_for_call(inputContext, pDev))
         return InputResult::LowLatencyUpdateFail;
 
     if (!latency_params)
@@ -936,7 +959,7 @@ bool InputCommon::copy_frame_reports(FrameReport* reports)
 
 InputResult InputCommon::get_frame_reports(const InputContext& inputContext, IUnknown* pDev, FrameReport* reports)
 {
-    if (!update_low_latency_tech(pDev, register_call(inputContext, pDev)))
+    if (!update_for_call(inputContext, pDev))
         return InputResult::LowLatencyUpdateFail;
 
     if (reports == nullptr)

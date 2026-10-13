@@ -1,9 +1,11 @@
 #include "pch.h"
 
 #include "input_reflex.h"
+#include "RoutedInputRule.h"
 #include <hooks/Reflex_Hooks.h>
 
 #include <intrin.h>
+#include <type_traits>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -19,6 +21,16 @@ SleepMode ToSleepMode(const NV_SET_SLEEP_MODE_PARAMS& params)
     sleepMode.use_min_queue_time = params.bUseMinQueueTime;
     return sleepMode;
 }
+// The game calls these through the pointers ForInterface hands out
+static_assert(std::is_same_v<decltype(&InputReflex::D3D_SetSleepMode), decltype(&NvAPI_D3D_SetSleepMode)>);
+static_assert(std::is_same_v<decltype(&InputReflex::D3D_Sleep), decltype(&NvAPI_D3D_Sleep)>);
+static_assert(std::is_same_v<decltype(&InputReflex::D3D_GetLatency), decltype(&NvAPI_D3D_GetLatency)>);
+static_assert(std::is_same_v<decltype(&InputReflex::D3D_SetLatencyMarker), decltype(&NvAPI_D3D_SetLatencyMarker)>);
+static_assert(
+    std::is_same_v<decltype(&InputReflex::D3D12_SetAsyncFrameMarker), decltype(&NvAPI_D3D12_SetAsyncFrameMarker)>);
+
+// InputCommon hears of the game's call, once: not of one made from inside the router (RoutedInputRule.h)
+bool TellsInputCommon(bool game) { return routedinput::TellsInputCommon(game, ReflexHooks::inRoutedCall()); }
 } // namespace
 
 void* InputReflex::ForInterface(unsigned int interfaceId)
@@ -46,12 +58,13 @@ NvAPI_Status InputReflex::D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PAR
         return NVAPI_INVALID_ARGUMENT;
 
     const bool game = ReflexHooks::isGameCall(_ReturnAddress());
+    const bool tell = TellsInputCommon(game);
 
     // The game's own mode: the router puts the frame cap into the call it passes on
     auto sleepMode = ToSleepMode(*pSetSleepModeParams);
     const auto result = ReflexHooks::routeSetSleepMode(pDev, pSetSleepModeParams, game);
 
-    if (game && pDev != nullptr)
+    if (tell && pDev != nullptr)
         InputCommon::set_sleep_mode(inputContext, pDev, &sleepMode);
 
     return result;
@@ -60,9 +73,10 @@ NvAPI_Status InputReflex::D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_MODE_PAR
 NvAPI_Status InputReflex::D3D_Sleep(IUnknown* pDev)
 {
     const bool game = ReflexHooks::isGameCall(_ReturnAddress());
+    const bool tell = TellsInputCommon(game);
     const auto result = ReflexHooks::routeSleep(pDev, game);
 
-    if (game && pDev != nullptr)
+    if (tell && pDev != nullptr)
         InputCommon::sleep(inputContext, pDev);
 
     return result;
@@ -79,6 +93,7 @@ NvAPI_Status InputReflex::D3D_SetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER
         return NVAPI_INVALID_ARGUMENT;
 
     const bool game = ReflexHooks::isGameCall(_ReturnAddress());
+    const bool tell = TellsInputCommon(game);
 
     MarkerParams markerParams {};
     markerParams.frame_id = pSetLatencyMarkerParams->frameID;
@@ -87,7 +102,7 @@ NvAPI_Status InputReflex::D3D_SetLatencyMarker(IUnknown* pDev, NV_LATENCY_MARKER
     const auto result = ReflexHooks::routeSetLatencyMarker(pDev, pSetLatencyMarkerParams, game);
 
     // Tracked only: the router delivered it
-    if (game && pDev != nullptr)
+    if (tell && pDev != nullptr)
         InputCommon::set_marker(inputContext, pDev, markerParams, false);
 
     return result;

@@ -369,6 +369,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.h" />
     <ClInclude Include="low_latency\input\input_common.h" />
     <ClInclude Include="low_latency\input\UeInputRule.h" />
+    <ClInclude Include="low_latency\input\RoutedInputRule.h" />
     <ClInclude Include="low_latency\input\input_reflex.h" />
     <ClInclude Include="low_latency\low_latency_tech\ll_reflex_vk.h" />
     <ClInclude Include="low_latency\low_latency_tech\ll_reflex.h" />

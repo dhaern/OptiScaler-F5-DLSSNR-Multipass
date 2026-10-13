@@ -111,7 +111,11 @@ class InputCommon
 
     static bool deinit_current_tech();
     static bool init_tech(IUnknown* pDevice, API api, LowLatencyMode desiredMode);
-    static bool update_low_latency_tech(IUnknown* pDevice, API api, std::optional<LowLatencyMode> mode = std::nullopt);
+    // `callerRouted`: the call is from an input ReflexHooks' router delivers (routed_input)
+    static bool update_low_latency_tech(IUnknown* pDevice, API api, std::optional<LowLatencyMode> mode = std::nullopt,
+                                        bool callerRouted = false);
+    // The same for an input's call, which also marks the input as available
+    static bool update_for_call(const InputContext& inputContext, IUnknown* pDevice);
     static void add_marker_to_report(const MarkerParams& marker_params);
     static bool copy_frame_reports(FrameReport* reports); // NVAPI_BUFFER_SIZE reports, oldest first
 
@@ -193,8 +197,10 @@ class InputCommon
     // OptiScaler's own Streamline
     static LowLatencyInput default_input();
 
-    // An input whose calls ReflexHooks' router still delivers (input_reflex.h): the game's Reflex. While it is the
-    // active input no output of InputCommon's runs, as it would be a second one next to the router's.
+    // An input whose calls ReflexHooks' router still delivers (input_reflex.h): the game's Reflex. InputCommon only
+    // tracks its calls. While it is the active input no output of InputCommon's runs, as it would be a second sleeper
+    // next to the router, and its calls never start one (RoutedInputRule.h ForCall; an output asked for by name is
+    // not covered yet: nothing asks for one).
     static constexpr bool routed_input(LowLatencyInput input) { return input == LowLatencyInput::Reflex; }
 
     // The GPU vendor's own low latency output
