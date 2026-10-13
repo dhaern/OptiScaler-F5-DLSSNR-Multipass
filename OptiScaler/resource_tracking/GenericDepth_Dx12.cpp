@@ -110,6 +110,7 @@ struct Backup
     ID3D12Resource* readback = nullptr;                 // the same copy in CPU-readable memory, for the on-screen preview
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};    // where the first plane sits in it
     UINT64 readbackBytes = 0;                           // its size: the last row is not padded to RowPitch
+    ID3D12Device* device = nullptr; // the device they were made on (not held): another needs its own
     // A multisampled buffer. On a device that can resolve a region (DepthResolveSupported) and a buffer with quality 0
     // or the standard pattern: the game's list resolves it to its nearest sample straight into a single-sample slot of
     // the same format family (native/DepthSnapshotDx12.h), so the copies are read like a single-sample buffer's.
@@ -240,7 +241,7 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     if (g_backup.width == source.Width && g_backup.height == source.Height && g_backup.typeless == typeless &&
         g_backup.samples.Count == source.SampleDesc.Count && g_backup.samples.Quality == source.SampleDesc.Quality &&
         g_backup.multisampledTypeless == multisampledTypeless && g_backup.resolveInList == resolveInList &&
-        g_backup.readback != nullptr)
+        g_backup.device == device && g_backup.readback != nullptr)
         return true;
 
     D3D12_RESOURCE_DESC desc {};
@@ -313,6 +314,7 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     g_resolvedFrame = ~0ull;
     g_backup = Backup { (uint32_t) source.Width, source.Height, typeless, view, readback, footprint, total };
     g_backup.samples = source.SampleDesc;
+    g_backup.device = device;
     g_backup.resolveInList = resolveInList;
     g_backup.multisampledTypeless = multisampledTypeless;
     g_backup.multisampledView = multisampledView;

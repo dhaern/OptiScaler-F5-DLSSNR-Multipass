@@ -329,6 +329,7 @@ SnapshotRequest DepthFinderCore::FlushForPresent(uint64_t context)
         request.id = stats->resource;
         request.readOnlyDepth = stats->readOnlyDepth;
         request.stretchVertices = stats->current.vertices;
+        request.reversed = _pick.reversed;
         request.where = "present";
         stats->current = DrawStats {};
     }
