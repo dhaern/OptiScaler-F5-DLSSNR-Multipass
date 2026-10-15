@@ -20,6 +20,7 @@
 
 #include "NativeProducer.h"
 #include "VirtualUpscalerHold.h"
+#include "VirtualUpscalerParams.h"
 
 #include <d3d12.h>
 #include <dxgiformat.h>
@@ -38,6 +39,32 @@ namespace native
 // True when `feature` (State::currentFeature) is Optical F5Low's own virtual upscaler, not a game's.
 bool IsVirtualUpscalerFeature(const void* feature);
 
+bool WantedBackendReadsSubrectBase();
+
+struct ScaledTarget
+{
+    uint32_t outputWidth = 0, outputHeight = 0; // the size the backend writes (the game's EASU output)
+    D3D12_RECT renderSubrect {};                // the part of frame.color that is the picture (FsrEasuCon viewport)
+
+    D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    bool allowNr = true; // A scaled NR pass may write only a private input copy, never the game picture.
+
+    DXGI_FORMAT outputFormat = DXGI_FORMAT_UNKNOWN;
+    ID3D12Resource* output = nullptr; // Optional, borrowed full-size typed UAV; never owned or retired by the driver.
+    D3D12_RESOURCE_STATES outputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; // preserved around RunScaled
+
+    // False: refuse before allocating, retiring, or recording when Prepare is needed.
+    bool allowBuild = true;
+};
+
+struct Retired
+{
+    void (*destroy)(void* object) = nullptr;
+    void* object = nullptr;
+};
+using RetireFn = void (*)(void* context, Retired retired);
+
 class VirtualUpscalerDriver
 {
   public:
@@ -54,6 +81,21 @@ class VirtualUpscalerDriver
     bool Run(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame, ID3D12CommandQueue* queue,
              DXGI_COLOR_SPACE_TYPE colorSpace, uint64_t epoch);
 
+    // Input states are restored; motion rests in NON_PIXEL_SHADER_RESOURCE, depth in target.depthState.
+    // The caller restores list bindings and resets history after any skipped frame.
+    bool RunScaled(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame, const ScaledTarget& target);
+
+    // Submit on the game queue (and order every consuming queue after it) before RunScaled with allowBuild=false.
+    bool Prepare(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame, const ScaledTarget& target);
+
+    // Owned by the driver, valid until the next call; UAV on entry/exit. Null until RunScaled, and on entering Run.
+    // Also null when RunScaled borrows target.output; that texture's outputState is preserved.
+    ID3D12Resource* Output() const;
+
+    bool WouldRebuild(const NativeFrame& frame, const ScaledTarget& target) const;
+
+    void RebuildAfterDiscardedList();
+
     // Drops the backend the way a game releasing its feature does: frame generation is told, currentFeature is cleared, and the
     // feature is destroyed once the GPU can no longer be using it. Nothing happens when there is none.
     void Release();
@@ -62,6 +104,9 @@ class VirtualUpscalerDriver
     // stay, only currentFeature lets go of it. The next Run resumes, telling frame generation its input changed.
     void Pause();
 
+    // A sink owns deferred destruction until all lists referencing the objects have reached their fences.
+    void SetRetireSink(RetireFn fn, void* context);
+
     bool Active() const { return _feature != nullptr; }
 
     // NR ran on the game's picture itself in the last frame and the backend does not process it: it only feeds frame
@@ -69,43 +114,83 @@ class VirtualUpscalerDriver
     bool NrInPlace() const { return _nrInPlace.load(std::memory_order_relaxed); }
     // The backend's pass ran over the picture in the last frame ([DlssNr] NativeUpscalerPass true). Read by the menu thread.
     bool BackendPass() const { return _backendPass.load(std::memory_order_relaxed); }
-    const std::string& Error() const { return _error; }
-    const std::string& BackendName() const { return _backendName; }
+    uint64_t Builds() const { return _builds; }
+
+    std::string Error() const;
+    std::string BackendName() const;
+    std::string BackendVersion() const;
 
   private:
     struct Key
     {
         uint32_t width = 0;
         uint32_t height = 0;
-        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN; // typed and UAV-capable: the output's, and the input copy's
+        uint32_t outWidth = 0; // output: Run's is the render size
+        uint32_t outHeight = 0;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;    // typed and UAV-capable: the input copy's
+        DXGI_FORMAT outFormat = DXGI_FORMAT_UNKNOWN; // the output's: Run's is `format`
+        bool lowResMV = false; // RunScaled's: its motion is render-sized (Run's guides are output-sized)
         bool depthReversed = false;
         bool hdr = false;
+        bool fixedExposure = false;
         int backend = 0; // an Upscaler
 
         bool operator==(const Key&) const = default;
     };
 
+    static bool SameShape(const Key& a, const Key& b);
+
+    // What Run's NR on the picture in place takes (DlssNr::ApplyVirtualUpscalerInput); RunScaled passes none.
+    struct RunNr
+    {
+        ID3D12CommandQueue* queue = nullptr;
+        DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        uint64_t epoch = 0;
+    };
+    bool Upscale(ID3D12GraphicsCommandList* cmd, const NativeFrame& frame, const ScaledTarget* target,
+                 const RunNr& run);
+    Key PictureKey(const NativeFrame& frame, const D3D12_RESOURCE_DESC& colorDesc) const;
+    const char* ScaledKey(const NativeFrame& frame, const ScaledTarget& target, Key& key, vparams::Subrect& rect) const;
+    static Key OutputKey(const Key& key);
+    bool Start(ID3D12GraphicsCommandList* cmd, bool scaled);
+    bool TakeBackendSwitch(Key& key);
+    void LetGo(ID3D12Resource*& texture);
+    void LetGo(std::unique_ptr<IFeature_Dx12> feature);
+    void Refuse(const char* why);
+    void SetError(std::string error, bool refusal = false);
+    void ClearError();
+    void SetBackendName(std::string name);
+
     // `realDepth`: this frame has the game's depth (not the all-far stand-in).
     bool EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth);
     bool CreateFeature(ID3D12GraphicsCommandList* cmd, const Key& key, Upscaler backend);
     void DropFeature(bool destroyFgContext);
+    static bool TextureMissing(const ID3D12Resource* texture, const Key& made, const Key& key);
     bool EnsureTexture(ID3D12Resource*& texture, Key& made, const Key& key, D3D12_RESOURCE_FLAGS flags,
                        D3D12_RESOURCE_STATES restState, const char* what);
+
     ID3D12Resource* NeutralDepth(ID3D12GraphicsCommandList* cmd, const Key& key);
+    bool EnsureFixedExposure(ID3D12GraphicsCommandList* cmd);
+    const char* BuildNeeded(const NativeFrame& frame, const Key& key, bool copyIn, const vparams::Subrect& rect) const;
 
     ID3D12Device* _device = nullptr;
     NVNGX_Parameters* _params = nullptr; // one block for the driver's life: features read it at Init only
+    NVNGX_Parameters* _scaledParams = nullptr; // RunScaled's own block: its render subrect must never reach a Run call
     std::unique_ptr<IFeature_Dx12> _feature;
     Key _featureKey;
     std::string _backendName;
+    std::string _backendVersion;
     bool _failed = false;
     Key _failedKey;
     bool _paused = false;
     bool _featureRealDepth = false;   // the backend was built on a frame with the game's depth (its direction is known)
+    bool _freshFeature = false;       // the backend built last has not evaluated yet (RunScaled asks it for a reset)
+    bool _modeSwitched = false;       // and it replaced one built for the other mode (Run asks for a reset then too)
     hold::RebuildSettle<Key> _settle; // a flip of the depth direction or HDR must hold before a rebuild
 
     ID3D12Resource* _output = nullptr; // rests in UNORDERED_ACCESS
     Key _outputKey;
+    vparams::OutputOwner _outputOwner; // whether _output is RunScaled's (Output())
     ID3D12Resource* _input = nullptr; // a typed copy of the picture when the picture itself is typeless; rests in COPY_DEST
     Key _inputKey;
     ID3D12Resource* _neutralDepth = nullptr; // all far, for frames with no depth; rests in NON_PIXEL_SHADER_RESOURCE
@@ -113,13 +198,21 @@ class VirtualUpscalerDriver
     bool _neutralFilled = false;
     bool _neutralReversed = false;
     ID3D12DescriptorHeap* _rtvHeap = nullptr;
+    ID3D12Resource* _exposure = nullptr; // 1x1 R32_FLOAT, fixed 1.0, rests in NON_PIXEL_SHADER_RESOURCE
+
+    RetireFn _retire = nullptr;
+    void* _retireContext = nullptr;
+    uint64_t _builds = 0;
 
     uint64_t _evaluations = 0;
     int _routeLogged = -1; // the VuNrRoute the log last said (-1: none yet)
     std::atomic<bool> _nrInPlace { false };
     std::atomic<bool> _backendPass { false };
     uint32_t _zeroSizeFrames = 0;
+    const char* _lastRefusal = nullptr; // RunScaled's last reason not to go on, logged when it changes
+    bool _errorIsRefusal = false;       // _error is that reason, cleared by RunScaled's next evaluation
     std::string _error;
+    mutable SRWLOCK _textLock = SRWLOCK_INIT; // _error and _backendName against Error()/BackendName() on other threads
 };
 
 } // namespace native

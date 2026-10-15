@@ -28,9 +28,22 @@ void NativeDriver::PauseVirtualUpscaler()
         _virtualUpscaler->Pause();
 }
 
+roles::Roles NativeDriver::DecideRoles() const
+{
+    const auto& cfg = *Config::Instance();
+
+    roles::Keys keys;
+    keys.nativeMotion = cfg.DlssNrNativeMotion.value_or_default();
+    keys.nativeInput = cfg.DlssNrNativeInput.value_or_default();
+    keys.nativeUpscaler = cfg.DlssNrNativeUpscaler.value_or_default();
+    keys.replaceGameFsr1 = cfg.ReplaceGameFsr1.value_or_default();
+    keys.inListApi = _inListApi;
+    return roles::Decide(keys);
+}
+
 bool NativeDriver::Enabled()
 {
-    if (!Config::Instance()->DlssNrNativeMotion.value_or_default())
+    if (!DecideRoles().enabled)
     {
         ReleaseVirtualUpscaler();
         _status = Status::Off;
@@ -52,9 +65,59 @@ void NativeDriver::LogDiagnostics()
              _diagNative, _cuts, _virtualUpscaler != nullptr && _virtualUpscaler->Active() ? "active" : "not active");
 }
 
-NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview)
+bool NativeDriver::EnsureProducer(ID3D12Device* device)
+{
+    if (_producer != nullptr && _producer->Device() == device)
+        return true;
+
+    auto fresh = std::make_unique<NativeProducer>();
+
+    const double initStart = Util::MillisecondsNow();
+
+    if (!fresh->Init(device))
+    {
+        _failure = fresh->Error();
+        _status = Status::Failed;
+        LOG_ERROR("{}: {}", _tag, _failure);
+        return false;
+    }
+
+    // The upscaler backend belongs to the old device too.
+    if (_virtualUpscaler != nullptr)
+    {
+        delete _virtualUpscaler;
+        _virtualUpscaler = nullptr;
+    }
+
+    _producer = std::move(fresh);
+    LOG_INFO("{}: optical flow and trust mask ready{} (in {:.1f} ms, on the present thread)", _tag, _readyNote,
+             Util::MillisecondsNow() - initStart);
+    return true;
+}
+
+NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPreview, bool runPresentPath,
+                                               bool keepDevice)
 {
     RunResult out;
+
+    const roles::Roles roles = DecideRoles();
+
+    // Work recorded into a game's list may still run on the producer and the upscaler of the last device
+    const bool keep = keepDevice && _producer != nullptr && _producer->Device() != source.Device();
+
+    // The in-list pass alone, or recording now: the producer for this device and the virtual upscaler are made here,
+    // on the present thread, and nothing else is done (no picture is read, nothing runs on it, nothing reaches
+    // DLSS-NR). The present path's status is Off, as when NativeMotion is switched off.
+    if (roles.inListOnly || !runPresentPath)
+    {
+        _status = Status::Off;
+        _nativeRan = false;
+
+        if ((keep || EnsureProducer(source.Device())) && _virtualUpscaler == nullptr)
+            _virtualUpscaler = new VirtualUpscalerDriver();
+
+        return out;
+    }
 
     FrameInput input;
     const auto acquired = source.Acquire(input);
@@ -90,49 +153,28 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
         return out;
     }
 
-    ID3D12Device* device = source.Device();
-
-    if (_producer == nullptr || _producer->Device() != device)
+    if (keep || !EnsureProducer(source.Device()))
     {
-        auto fresh = std::make_unique<NativeProducer>();
-
-        const double initStart = Util::MillisecondsNow();
-
-        if (!fresh->Init(device))
-        {
-            _failure = fresh->Error();
-            _status = Status::Failed;
-            LOG_ERROR("{}: {}", _tag, _failure);
-            source.Return(input, FrameOutput {});
-            return out;
-        }
-
-        // The upscaler backend belongs to the old device too.
-        if (_virtualUpscaler != nullptr)
-        {
-            delete _virtualUpscaler;
-            _virtualUpscaler = nullptr;
-        }
-
-        _producer = std::move(fresh);
-        LOG_INFO("{}: optical flow and trust mask ready{} (in {:.1f} ms, on the present thread)", _tag, _readyNote,
-                 Util::MillisecondsNow() - initStart);
+        source.Return(input, FrameOutput {});
+        return out;
     }
 
     // Presents the picture to an upscaler backend as a synthetic call instead of running DLSS-NR on it. Takes priority
     // when both are on. Under a D3D11 game's frame generation swap chain (Dx11wDx12SC) it runs from OnFGPresent instead
-    // of the menu's present.
-    const bool useVirtualUpscaler = Config::Instance()->DlssNrNativeUpscaler.value_or_default();
+    // of the menu's present. The in-list pass keeps the virtual upscaler as well, but only NativeUpscaler gives it this
+    // picture.
+    const bool useVirtualUpscaler = roles.presentUsesVirtualUpscaler;
 
-    if (useVirtualUpscaler && _virtualUpscaler == nullptr)
+    if (roles.keepVirtualUpscaler && _virtualUpscaler == nullptr)
         _virtualUpscaler = new VirtualUpscalerDriver();
-    else if (!useVirtualUpscaler)
+    else if (!roles.keepVirtualUpscaler)
         ReleaseVirtualUpscaler();
 
     NativeProducer::Options options;
-    options.apply = useVirtualUpscaler || Config::Instance()->DlssNrNativeInput.value_or_default();
+    options.apply = roles.presentApplies;
     options.flowPreview = flowPreview;
     options.previewMaxSpeed = kPreviewMaxSpeed;
+    options.stageTimings = Config::Instance()->DlssNrNativeStageTimings.value_or_default();
 
     const auto apply = [this, &source, useVirtualUpscaler](ID3D12GraphicsCommandList* cmd, const NativeFrame& frame)
     {
@@ -162,6 +204,12 @@ NativeDriver::RunResult NativeDriver::RunFrame(IFrameSource& source, bool flowPr
     // Nothing ran on native input this frame (no NR mode, or the producer was not ready): NR's history must not reach across
     if (!result.nativeRan)
         DlssNr::NativeInputSkipped();
+    if (!result.timings.empty())
+        LOG_INFO("{}: Native timings (ms per frame, avg/max){}: {}", _tag,
+                 _virtualUpscaler != nullptr && _virtualUpscaler->Active()
+                     ? " with the " + _virtualUpscaler->BackendName() + " backend"
+                     : std::string(),
+                 result.timings);
 
     if (result.stoppedAt != nullptr)
     {
@@ -277,21 +325,23 @@ void NativeDriver::DrawStatus()
     }
 }
 
-void NativeDriver::DrawFlowTuning()
+void NativeDriver::DrawFlowTuning(bool live)
 {
     // Always shown and open on Optical F5Low's page; the settings live in the running motion estimate, so there is
     // nothing to tune until a mode runs.
     if (!ImGui::TreeNodeEx("Flow tuning (to compare, applies at once)##flowtuning", ImGuiTreeNodeFlags_DefaultOpen))
         return;
 
-    if (!_producer)
+    if (live ? !_producer : !_tuningShown)
     {
         ImGui::TextDisabled("Shown once a mode is running.");
         ImGui::TreePop();
         return;
     }
 
-    auto& tune = _producer->Flow()->Tuning();
+    // Busy this frame: the last values, disabled
+    auto tune = live ? _producer->Flow()->Tuning() : _shownTuning;
+    ImGui::BeginDisabled(!live);
     ImGui::SetNextItemWidth(160.0f);
     ImGui::SliderInt("Smoothing radius (0 = off)##flowsmooth", &tune.smoothRadius, 0, 4);
     ImGui::SetNextItemWidth(160.0f);
@@ -372,24 +422,37 @@ void NativeDriver::DrawFlowTuning()
     if (ImGui::Button("Defaults##flowdefaults"))
         tune = OpticalFlowDx12::Settings {};
 
+    ImGui::EndDisabled();
+
+    if (live)
+    {
+        _producer->Flow()->Tuning() = tune;
+        _shownTuning = tune;
+        _tuningShown = true;
+    }
+
     ImGui::TreePop();
 }
 
-void NativeDriver::DrawTrustViewCombo()
+void NativeDriver::DrawTrustViewCombo(bool live)
 {
-    if (!_producer)
+    if (live ? !_producer : !_tuningShown)
         return;
 
     static const char* kViews[] = {
         "Final mask", "Depth check",        "Revealed-surface check", "Flow consistency check",
         "Luma check", "Outside the picture"
     };
-    int view = _producer->Trust()->Tuning().debugView;
+    int view = live ? _producer->Trust()->Tuning().debugView : _shownTrustView;
 
     ImGui::SetNextItemWidth(220.0f);
+    ImGui::BeginDisabled(!live);
 
-    if (ImGui::Combo("Show##trustview", &view, kViews, IM_ARRAYSIZE(kViews)))
+    if (ImGui::Combo("Show##trustview", &view, kViews, IM_ARRAYSIZE(kViews)) && live)
         _producer->Trust()->Tuning().debugView = view;
+
+    ImGui::EndDisabled();
+    _shownTrustView = view;
 }
 
 } // namespace native

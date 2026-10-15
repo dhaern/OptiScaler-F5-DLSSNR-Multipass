@@ -470,19 +470,58 @@
     <ClInclude Include="native\VirtualUpscalerHold.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\VirtualUpscalerParams.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="motion\OpticalFlow_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="motion\SceneCut_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\ListStateDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\DescriptorTrackerDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\RootSignatureMap.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\DepthFinderCore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\Fsr1Signature.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\Fsr1Pass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\InListPending.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\InListUpscale.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\NativeDriverRoles.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\SpatialEnvelopeDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource_tracking\SpatialPass_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\ThreadTls.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\FrameContract.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\NativeProducer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\StageTimer_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\Dx12FrameSource.h">
@@ -492,6 +531,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\DepthResolveDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="native\DepthCopyLedger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="native\DepthSnapshotDx12.h">
@@ -714,6 +756,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\Dxgi_Hooks.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hooks\ListVtables.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="hooks\D3D12_Hooks.h">
@@ -1424,7 +1469,13 @@
     <ClCompile Include="hudfix\Hudfix_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="native\DescriptorTrackerDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="native\NativeDriverDx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="native\InListUpscale.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="native\NativeDriverDx11.cpp">
@@ -1491,6 +1542,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="resource_tracking\SpatialPass_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="resource_tracking\GenericDepth_Dx11.cpp">

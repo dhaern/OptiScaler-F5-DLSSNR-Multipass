@@ -1,4 +1,4 @@
-// Not built with the precompiled header: self-contained so the host GPU test can compile it alone.
+#include "pch.h"
 #include "OpticalFlow_Dx12.h"
 
 #include "../native/F5LowShaderBytecode.h"
@@ -251,9 +251,10 @@ void OpticalFlowDx12::ReleaseTextures()
         release(age);
 }
 
-bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
+bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height, int finestLevel)
 {
-    if (width == _width && height == _height && _flow.resource != nullptr)
+    finestLevel = std::clamp(finestLevel, 0, kLevels - 1);
+    if (width == _width && height == _height && finestLevel == _finestLevel && _flow.resource != nullptr)
         return true;
 
     // The previous work may still be reading these; a size change is rare (a resolution change) and the caller is expected
@@ -267,6 +268,9 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     _flowValid = false;
     _width = width;
     _height = height;
+    _finestLevel = finestLevel;
+    const uint32_t divisor = 2u << finestLevel;
+    const uint32_t flowWidth = (width + divisor - 1) / divisor, flowHeight = (height + divisor - 1) / divisor;
 
     uint32_t w = (width + 1) / 2;
     uint32_t h = (height + 1) / 2;
@@ -286,14 +290,13 @@ bool OpticalFlowDx12::EnsureSize(uint32_t width, uint32_t height)
     }
 
     for (Tex& age : _age)
-        if (!CreateTexture(age, (width + 1) / 2, (height + 1) / 2, kAgeFormat, L"OpticalFlow_StillAge"))
+        if (!CreateTexture(age, flowWidth, flowHeight, kAgeFormat, L"OpticalFlow_StillAge"))
             return false;
 
-    return CreateTexture(_flowMedian, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_FlowMedian") &&
+    return CreateTexture(_flowMedian, flowWidth, flowHeight, kFlowFormat, L"OpticalFlow_FlowMedian") &&
            CreateTexture(_globalFlow, 1, 1, kFlowFormat, L"OpticalFlow_Global") &&
-           CreateTexture(_flow, (width + 1) / 2, (height + 1) / 2, kFlowFormat, L"OpticalFlow_Flow") &&
-           CreateTexture(_preview, (width + 1) / 2, (height + 1) / 2, DXGI_FORMAT_R8G8B8A8_UNORM,
-                         L"OpticalFlow_Preview");
+           CreateTexture(_flow, flowWidth, flowHeight, kFlowFormat, L"OpticalFlow_Flow") &&
+           CreateTexture(_preview, flowWidth, flowHeight, DXGI_FORMAT_R8G8B8A8_UNORM, L"OpticalFlow_Preview");
 }
 
 void OpticalFlowDx12::Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state)
@@ -389,7 +392,7 @@ void OpticalFlowDx12::StampBegin(ID3D12GraphicsCommandList* list)
 {
     if (_timeHeap != nullptr && _timeCount == 0 && _timeCapacity >= 2 && _timeCapacity <= 64)
     {
-        list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
+        list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeBase + _timeCount);
         _timeNames[_timeCount++] = "start";
     }
 }
@@ -399,7 +402,7 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
     if (_timeHeap == nullptr || _timeCount == 0 || _timeCount >= _timeCapacity || _timeCount >= 64)
         return;
 
-    list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeCount);
+    list->EndQuery(_timeHeap, D3D12_QUERY_TYPE_TIMESTAMP, _timeBase + _timeCount);
     _timeNames[_timeCount++] = name != nullptr ? name
                                : pso == _luma || pso == _lumaSdr || pso == _lumaScRgb || pso == _lumaPq ? "luma"
                                : pso == _down                                                         ? "down"
@@ -411,14 +414,15 @@ void OpticalFlowDx12::StampEnd(ID3D12GraphicsCommandList* list, ID3D12PipelineSt
 }
 
 bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
-                               ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed, Encoding encoding)
+                               ID3D12Resource* depth, DXGI_FORMAT depthFormat, bool depthReversed, Encoding encoding,
+                               int finestLevel, int smoothRadius, float jitterX, float jitterY)
 {
     if (_device == nullptr || _match == nullptr || list == nullptr || color == nullptr)
         return false;
 
     const D3D12_RESOURCE_DESC colorDesc = color->GetDesc();
 
-    if (!EnsureSize((uint32_t) colorDesc.Width, colorDesc.Height))
+    if (!EnsureSize((uint32_t) colorDesc.Width, colorDesc.Height, finestLevel))
     {
         _error = "creating the textures";
         return false;
@@ -434,6 +438,8 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
     constants.auxX = (uint32_t) colorDesc.Width;
     constants.auxY = colorDesc.Height;
     constants.whiteNits = (std::max)(_settings.hdrWhiteNits, 1.0f);
+    constants.jitterX = jitterX;
+    constants.jitterY = jitterY;
     Pass(list,
          !_settings.perceptualLuma     ? _luma
          : encoding == Encoding::ScRgb ? _lumaScRgb
@@ -441,6 +447,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
                                        : _lumaSdr,
          color, colorFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr, DXGI_FORMAT_UNKNOWN, current[0], kLumaFormat,
          constants);
+    constants.jitterX = constants.jitterY = 0.f;
 
     // Is this frame a hard cut from the last one? Decided here, on the GPU, so the match and the trust mask can act on
     // it in this very frame.
@@ -479,7 +486,7 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
 
     if (_havePrevious)
     {
-        for (int level = kLevels - 1; level >= 0; --level)
+        for (int level = kLevels - 1; level >= _finestLevel; --level)
         {
             const bool coarsest = level == kLevels - 1;
 
@@ -499,16 +506,16 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
             constants.hasGlobal = _globalReady ? 1 : 0;
             constants.inverseRefinement = _settings.inverseRefinement ? 1 : 0;
             constants.sceneCutEnabled = _sceneCutRan ? 1 : 0;
-            constants.zeroMargin = level == 0 ? _settings.zeroMargin : 0.0f;
+            constants.zeroMargin = level == _finestLevel ? _settings.zeroMargin : 0.0f;
             constants.zeroReach = (uint32_t) std::clamp(_settings.zeroReach, 0, 64);
             constants.scale = 1.0f / (float) (2 << level); // full-resolution pixels in this level's
-            constants.stillFrames = level == 0 ? (uint32_t) std::clamp(_settings.stillFrames, 0, 255) : 0;
+            constants.stillFrames = level == _finestLevel ? (uint32_t) std::clamp(_settings.stillFrames, 0, 255) : 0;
             constants.hasAge = _ageValid ? 1 : 0;
             constants.stillEpsilon = _settings.stillEpsilon;
             constants.stillMargin = _settings.stillMargin;
 
             // The brightness weights, on the finest level (with depth on top of the depth weights).
-            constants.lookWeights = level == 0 && _settings.lookWeights ? 1 : 0;
+            constants.lookWeights = level == _finestLevel && _settings.lookWeights ? 1 : 0;
             constants.lookRange = (std::max)(_settings.lookRange, 1e-4f);
             constants.lookDistance = (std::max)(_settings.lookDistance, 0.5f);
 
@@ -545,15 +552,16 @@ bool OpticalFlowDx12::Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* 
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
-        constants.scale = 2.0f; // the half-resolution level's pixels to full-resolution ones
-        Pass(list, _median, levelNow[0].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
+        constants.scale = float(2u << _finestLevel);
+        Pass(list, _median, levelNow[_finestLevel].resource, kFlowFormat, nullptr, DXGI_FORMAT_UNKNOWN, nullptr,
              DXGI_FORMAT_UNKNOWN, _flowMedian, kFlowFormat, constants);
 
         constants = Constants {};
         constants.sizeX = _flow.width;
         constants.sizeY = _flow.height;
-        constants.radius = std::clamp(_settings.smoothRadius, 0, 4); // the shader's tile holds at most four pixels around a group
-        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[0].resource, kLumaFormat, nullptr,
+        constants.radius = std::clamp(smoothRadius < 0 ? _settings.smoothRadius : smoothRadius, 0,
+                                      4); // the shader's tile holds at most four pixels around a group
+        Pass(list, _smooth, _flowMedian.resource, kFlowFormat, current[_finestLevel].resource, kLumaFormat, nullptr,
              DXGI_FORMAT_UNKNOWN, _flow, kFlowFormat, constants);
 
         if (_settings.globalCandidate)

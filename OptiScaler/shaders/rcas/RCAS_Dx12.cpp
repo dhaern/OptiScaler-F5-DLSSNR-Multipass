@@ -98,6 +98,24 @@ bool RCAS_Dx12::DispatchDepthAdaptive(ID3D12PipelineState* pipelineState, ID3D12
     return true;
 }
 
+bool RCAS_Dx12::InListViewsReady(bool make)
+{
+    if (_inListViewsReady)
+        return true;
+    if (!make || !_init || _device == nullptr)
+        return false;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC unused {};
+    unused.Format = DXGI_FORMAT_R32_FLOAT;
+    unused.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    unused.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    unused.Texture2D.MipLevels = 1;
+    for (auto& heap : _frameHeaps)
+        _device->CreateShaderResourceView(nullptr, &unused, heap.GetSrvCPU(2));
+    _inListViewsReady = true;
+    return true;
+}
+
 bool RCAS_Dx12::CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSource, D3D12_RESOURCE_STATES InState)
 {
     auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |

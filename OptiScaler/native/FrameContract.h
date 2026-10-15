@@ -73,6 +73,7 @@ struct FrameInput
     ColorSpace colorSpace = ColorSpace::Srgb;
     uint32_t width = 0;
     uint32_t height = 0;
+    float jitter[2] {};
 
     // The scene's depth: one or more copies of the picked buffer (a game that splits the scene over several lists leaves each
     // copy holding part of it; the nearest surface over all of them is the scene). They rest in

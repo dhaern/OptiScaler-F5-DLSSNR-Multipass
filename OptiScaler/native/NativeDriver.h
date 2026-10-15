@@ -8,8 +8,13 @@
 // hooks, the threads), the depth finder's frame close, the menu's pictures. Everything else lives here: the [DlssNr]
 // gate, Acquire, the producer made again when its device changes, the virtual upscaler's life, the consumer (DLSS-NR or
 // the virtual upscaler), the bookkeeping, the log lines and the status line.
+//
+// The producer and the virtual upscaler have two possible owners (native/NativeDriverRoles.h): the present path
+// ([DlssNr] NativeMotion) and, in D3D12's driver, the in-list pass ([Upscalers] ReplaceGameFsr1), which needs no
+// [DlssNr] key. Either keeps them; with both off the virtual upscaler is released.
 
 #include "FrameContract.h"
+#include "NativeDriverRoles.h"
 #include "NativeProducer.h"
 #include "VirtualUpscalerHold.h"
 
@@ -41,38 +46,55 @@ class NativeDriver
     };
 
     // `tag` starts every log line ("Native motion", "Native motion (D3D11)"); `readyNote` is added to the line that
-    // says the producer is ready.
-    NativeDriver(const char* tag, const char* readyNote) : _tag(tag), _readyNote(readyNote) {}
+    // says the producer is ready. `inListApi`: this is D3D12's driver, the one the in-list pass uses.
+    NativeDriver(const char* tag, const char* readyNote, bool inListApi = false)
+        : _tag(tag), _readyNote(readyNote), _inListApi(inListApi)
+    {
+    }
 
     // Not copyable, and the virtual upscaler is never destroyed here (see _virtualUpscaler).
     NativeDriver(const NativeDriver&) = delete;
     NativeDriver& operator=(const NativeDriver&) = delete;
 
-    // The first thing a present does: false while [DlssNr] NativeMotion is off (the virtual upscaler is released and
-    // the status goes back to Off).
+    // The first thing a present does: false while neither owner wants the driver, [DlssNr] NativeMotion and (D3D12)
+    // [Upscalers] ReplaceGameFsr1 both off (the virtual upscaler is released and the status goes back to Off).
     bool Enabled();
 
     // Once the producer could not start nothing more is tried (the status line says why).
     bool Failed() const { return _status == Status::Failed; }
 
     // One frame: Acquire on `source` (its SetPresent is done), the producer, Return. `flowPreview` asks the producer
-    // for the flow picture the menu shows.
-    RunResult RunFrame(IFrameSource& source, bool flowPreview);
+    // for the flow picture the menu shows. With the in-list pass alone (no present path), or while the in-list pass
+    // records (`runPresentPath` false, native::inlist::BeginPresent): only EnsureProducer on source.Device() and the
+    // virtual upscaler made; no Acquire, no Run, nothing given to DLSS-NR, `ran` stays false. `keepDevice`: work
+    // recorded into a game's list may still run, so a producer made for another device is kept (the frame is left out).
+    RunResult RunFrame(IFrameSource& source, bool flowPreview, bool runPresentPath = true, bool keepDevice = false);
+
+    // Makes the producer for `device`, again when the device changed (which deletes the virtual upscaler too: its
+    // backend belongs to the old device). On the present thread, never on a game's recording thread. False when the
+    // producer could not start (the status is then Failed and says why).
+    bool EnsureProducer(ID3D12Device* device);
 
     // ImGui: one line for the mode in effect (waiting/failed, NR or the stabiliser on this picture, or why not).
     void DrawStatus();
 
-    // ImGui: the optical flow's tuning, with NativeDebugView on and a producer made. Applies at once.
-    void DrawFlowTuning();
+    // ImGui: the optical flow's tuning, with NativeDebugView on and a producer made. Applies at once. `live` false (the
+    // session is busy this frame): the last values shown, disabled, nothing read or written.
+    void DrawFlowTuning(bool live = true);
 
-    // ImGui: which one of the trust mask's checks to look at (the mask picture shows it).
-    void DrawTrustViewCombo();
+    // ImGui: which one of the trust mask's checks to look at (the mask picture shows it). `live` as above.
+    void DrawTrustViewCombo(bool live = true);
 
     // NR ran on the finished picture in the last frame (not the virtual upscaler): the menu header says so.
     bool NrOnlyRunning() const;
 
-    // For the API drivers' menu pictures and status text.
+    // For the API drivers' menu pictures and status text, and for the in-list pass under its API driver's session.
     NativeProducer* Producer() { return _producer.get(); }
+    // Null until a present with an owner that keeps it (Roles::keepVirtualUpscaler). Released (its backend let go)
+    // when no owner keeps it; deleted only by EnsureProducer on a device change.
+    VirtualUpscalerDriver* VirtualUpscaler() { return _virtualUpscaler; }
+    // The owners the configuration asks for now (read on every call; nothing is stored).
+    roles::Roles DecideRoles() const;
     Status GetStatus() const { return _status; }
     uint64_t Frame() const { return _frame; }
     uint64_t Cuts() const { return _cuts; }
@@ -87,6 +109,7 @@ class NativeDriver
 
     const char* _tag;
     const char* _readyNote;
+    const bool _inListApi;
 
     std::unique_ptr<NativeProducer> _producer;
 
@@ -112,6 +135,11 @@ class NativeDriver
     uint64_t _stopped = 0; // frames the producer gave up on
     uint64_t _seen = 0,
              _ran = 0; // frames with a valid flow, and those the trust mask ran in: the log shows it every 600
+
+    // What the menu showed last, for a frame it cannot read the producer (DrawFlowTuning, DrawTrustViewCombo)
+    OpticalFlowDx12::Settings _shownTuning {};
+    int _shownTrustView = 0;
+    bool _tuningShown = false;
 };
 
 } // namespace native

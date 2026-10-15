@@ -674,6 +674,11 @@ class Config
     // and trust pictures" there. The controls (flow tuning, the depth overlay switch) show either way. Off, the depth
     // overlay's copy is not made (read at the start for that).
     CustomOptional<bool> DlssNrNativeDebugView { false };
+    // NativeStageTimings: debug, D3D12. GPU timestamps around each step of the native input producer (the optical
+    // flow's passes, the trust mask, the guides) and of the virtual upscaler (its copies, the frame generation inputs,
+    // the backend's Evaluate), logged as average/max ms per frame every 600 frames. See native/StageTimer_Dx12.h. Costs
+    // one timestamp per step and a small readback a frame.
+    CustomOptional<bool> DlssNrNativeStageTimings { false };
     // NativeMotion: estimates the optical flow of the finished picture on the GPU while the game makes no upscaler
     // call, feeding NativeInput/NativeUpscaler below (on its own it estimates but feeds nothing). Changes apply at
     // once. Set by the menu's mode selector (dlssnr/DlssNr_NativeMode.h). See native/NativeDriverDx12.h and
@@ -1022,6 +1027,7 @@ class Config
     CustomOptional<Upscaler, SoftDefault> Dx11Upscaler { Upscaler::FSR22 };
     CustomOptional<Upscaler, SoftDefault> Dx12Upscaler { Upscaler::XeSS };
     CustomOptional<Upscaler, SoftDefault> VulkanUpscaler { Upscaler::FSR22 };
+    CustomOptional<bool> ReplaceGameFsr1 { false };
 
     // Output Scaling
     CustomOptional<bool> OutputScalingEnabled { false };

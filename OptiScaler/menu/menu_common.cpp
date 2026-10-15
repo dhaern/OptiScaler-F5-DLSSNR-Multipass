@@ -10,6 +10,7 @@
 
 #include <dlssnr/DlssNr.h>
 #include <native/VirtualUpscalerDriver.h>
+#include <resource_tracking/SpatialPass_Dx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/VkPresentBridge.h>
 
@@ -2902,6 +2903,49 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             ImGui::Spacing();
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "nvngx_dlss.dll not found, DLSS disabled!");
         }
+    }
+
+    else if ((currentFeature == nullptr || currentFeature->IsFrozen()) &&
+             (state.api == DX12 || state.swapchainApi == DX12) && config->ReplaceGameFsr1.value_or_default())
+    {
+        ImGui::SeparatorText("Upscalers");
+        ImGui::TextUnformatted(primaryGpu.name.c_str());
+        ImGui::TextUnformatted("D3D12 | Replace Game's FSR1");
+        GetCurrentBackendInfo(DX12, currentBackend, &currentBackendName);
+        ImGui::PushItemWidth(180.0f * menuResScale);
+        AddDx12Backends(currentBackend);
+        ImGui::PopItemWidth();
+        ImGui::SameLine(0.0f, 6.0f);
+        if (ImGui::Button("Change Upscaler##2") && state.newBackend != Upscaler::Reset &&
+            state.newBackend != currentBackend)
+        {
+            config->Dx12Upscaler = state.newBackend;
+            if (state.newBackend == Upscaler::XeSS)
+            {
+                config->DisableReactiveMask.reset();
+                config->DlssReactiveMaskBias.reset();
+            }
+            MARK_ALL_BACKENDS_CHANGED();
+        }
+    }
+
+    if (state.swapchainApi == DX12 || SpatialPassDx12::Installed())
+    {
+        ImGui::Spacing();
+
+        if (bool replaceFsr1 = config->ReplaceGameFsr1.value_or_default();
+            ImGui::Checkbox("Replace Game's FSR1", &replaceFsr1))
+            config->ReplaceGameFsr1 = replaceFsr1;
+
+        ShowHelpMarker("Replaces the game's FSR1 upscale with the D3D12 upscaler (Dx12Upscaler), "
+                       "inside the game's own command list.\nNeeds the game's FSR1 on, with a render scale "
+                       "below 100%.\n"
+                       "Stands aside while the game calls DLSS, FSR 2+ or XeSS itself.\n"
+                       "Switching it on needs a game restart; switching it off applies at once.");
+
+        if (config->ReplaceGameFsr1.value_or_default() && !SpatialPassDx12::Installed())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Requires a game restart");
+
     }
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())

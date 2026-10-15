@@ -1,4 +1,4 @@
-#include <pch.h>
+#include "pch.h"
 
 #include <functional>
 #include <vector>
@@ -49,6 +49,31 @@ bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCo
     }
 
     return result;
+}
+
+bool IFeature_Dx12::PostPassBuffersReady(ID3D12Resource* output, bool make)
+{
+    if (RCAS == nullptr || !RCAS->IsInit())
+        return true;
+
+    if (output == nullptr || Device == nullptr)
+        return false;
+
+    if (!RCAS->InListViewsReady(make))
+        return false;
+
+    const auto wanted = output->GetDesc();
+
+    if (ID3D12Resource* buffer = RCAS->Buffer())
+    {
+        const auto made = buffer->GetDesc();
+
+        if (made.Width == wanted.Width && made.Height == wanted.Height && made.Format == wanted.Format)
+            return true;
+    }
+
+    // As Evaluate makes it (nextOutput is the output when output scaling is off)
+    return make && RCAS->CreateBufferResource(Device, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
 bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)

@@ -1,4 +1,4 @@
-// Not built with the precompiled header: self-contained so the host GPU test can compile it alone.
+#include "pch.h"
 #include "TrustMask_Dx12.h"
 
 #include "../native/F5LowShaderBytecode.h"
@@ -485,7 +485,8 @@ bool TrustMaskDx12::Dispatch(ID3D12GraphicsCommandList* list, const Inputs& in)
     return true;
 }
 
-bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height)
+bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height,
+                                bool copyDepth, DXGI_FORMAT motionFormat)
 {
     // in.depthCount == 0 still builds a motion-only guide (GuideMotion(), from the flow alone); the depth guide
     // pass is skipped below and GuideDepth() reports null rather than a previous frame's depth.
@@ -493,22 +494,21 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
         height == 0 || (in.depthCount > 0 && in.depths[0] == nullptr))
         return false;
 
-    if (_guideDepth.resource == nullptr || _guideDepth.width != width || _guideDepth.height != height)
+    auto ensureGuide = [&](Tex& tex, DXGI_FORMAT format, const wchar_t* name)
     {
-        // A picture size change: the owner has waited for the GPU as it does for any size change.
-        for (Tex* tex : { &_guideDepth, &_guideMotion })
-        {
-            if (tex->resource != nullptr)
-                tex->resource->Release();
-            *tex = Tex {};
-        }
-
-        if (!CreateTexture(_guideDepth, width, height, kDepthFormat, L"TrustMask_GuideDepth") ||
-            !CreateTexture(_guideMotion, width, height, kFlowFormat, L"TrustMask_GuideMotion"))
-        {
-            _error = "creating the guide textures";
-            return false;
-        }
+        if (tex.resource != nullptr && tex.width == width && tex.height == height &&
+            tex.resource->GetDesc().Format == format)
+            return true;
+        if (tex.resource != nullptr)
+            tex.resource->Release();
+        tex = Tex {};
+        return CreateTexture(tex, width, height, format, name);
+    };
+    if (!ensureGuide(_guideMotion, motionFormat, L"TrustMask_GuideMotion") ||
+        (copyDepth && in.depthCount > 0 && !ensureGuide(_guideDepth, kDepthFormat, L"TrustMask_GuideDepth")))
+    {
+        _error = "creating the guide textures";
+        return false;
     }
 
     Constants constants {};
@@ -522,7 +522,7 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
     const uint32_t groupsX = (width + 7) / 8;
     const uint32_t groupsY = (height + 7) / 8;
 
-    if (in.depthCount > 0)
+    if (copyDepth && in.depthCount > 0)
     {
         ID3D12Resource* srv[8];
         DXGI_FORMAT formats[8];
@@ -580,7 +580,7 @@ bool TrustMaskDx12::BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& i
         ID3D12Resource* const srv[8] = { flow, flow, depthHere, depthFlow, flow, flow, flow, flow };
         const DXGI_FORMAT formats[8] = { kFlowFormat, kFlowFormat, depthFormat, depthFormat,
                                          kFlowFormat, kFlowFormat, kFlowFormat, kFlowFormat };
-        Pass(list, _guideMotionPso, srv, formats, _guideMotion, kFlowFormat, groupsX, groupsY, constants);
+        Pass(list, _guideMotionPso, srv, formats, _guideMotion, motionFormat, groupsX, groupsY, constants);
     }
 
     return true;

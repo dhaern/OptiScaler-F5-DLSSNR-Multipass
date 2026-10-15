@@ -8,7 +8,10 @@
 class FFXFeatureDx12 : public FFXFeature, public IFeature_Dx12
 {
   private:
-    ID3D12Resource* smallerColor[2];
+    ID3D12Resource* smallerColor[2] {};
+    UINT _smallerColorIndex = 0;
+
+    bool CroppedColorDesc(ID3D12Resource* color, uint32_t width, uint32_t height, D3D12_RESOURCE_DESC& desc);
 
     NVSDK_NGX_Parameter* SetParameters(NVSDK_NGX_Parameter* InParameters);
 
@@ -21,6 +24,7 @@ class FFXFeatureDx12 : public FFXFeature, public IFeature_Dx12
     bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
     bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
     bool QueryProviders(ID3D12Device* device);
+    bool InputBuffersReady(ID3D12Resource* color, uint32_t width, uint32_t height, bool make) override;
 
     feature_version Version() override { return FFXFeature::Version(); }
     Upscaler GetUpscalerType() const final { return Upscaler::FFX; }

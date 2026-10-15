@@ -15,6 +15,7 @@
 
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
+#include <resource_tracking/SpatialPass_Dx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/VkPresentBridge.h>
 #include <low_latency/input/input_common.h>
@@ -557,6 +558,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             else
                 currentFeature->TickFrozenCheck();
         }
+
+        SpatialPassDx12::OnPresent();
 
         // Before the finished-picture pass, which composes from what the virtual upscaler's call captured this frame.
         if (cq && device12)

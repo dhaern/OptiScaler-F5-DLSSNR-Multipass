@@ -10,8 +10,50 @@
 #include <d3d12.h>
 #include <dxgi.h>
 
+#include <cstdint>
+
+namespace native
+{
+class NativeDriver;
+}
+
 namespace NativeMotionDx12
 {
+// The session: this driver's native::NativeDriver with its producer and virtual upscaler, and the step's frame source.
+// Lock order: the step's run lock, then the session, then frame generation's Mutex or the depth finder's lock. Nothing
+// locks it before the in-list pass's hooks are installed ([Upscalers] ReplaceGameFsr1): only the present uses the
+// session then, as before the pass existed. Once they are, the present holds it for its whole step (OnPresent,
+// OnFGPresent: outside frame generation's present lock); while frame generation exists (State::currentFG, active or
+// not) OnPresent only tries it, as its thread can be frame generation's presenter, and leaves the step out when it is
+// busy (BusyPresents). The menu only tries it. A game's recording thread (the in-list pass) only tries it, with
+// TrySession.
+class Session
+{
+  public:
+    Session(Session&& other) noexcept : _owned(other._owned) { other._owned = false; } // not copied, not assigned
+    ~Session();
+
+    explicit operator bool() const { return _owned; }
+
+    // The driver, while this session is owned; null otherwise. Producer() and VirtualUpscaler() may be null (no
+    // present has made them yet); neither is deleted while the session is owned.
+    native::NativeDriver* Driver() const;
+
+  private:
+    friend Session TrySession();
+    explicit Session(bool owned) : _owned(owned) {}
+
+    bool _owned = false;
+};
+
+// Never waits: owned, or not (the present or the menu has it). No allocation, no thread-local storage, no exception:
+// an SRW lock.
+Session TrySession();
+
+// How many presents OnPresent left out because the session was busy (its try, see Session): the depth finder's frame
+// was not closed and the step did not run on them. Any thread; for the in-list pass's log.
+uint64_t BusyPresents();
+
 // Both close the depth finder's frame (GenericDepthDx12::OnPresent) and then run the step, so the step reads the frame just
 // closed and the finder closes once per game frame.
 //

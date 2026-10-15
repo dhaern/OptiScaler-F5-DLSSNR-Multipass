@@ -9,6 +9,7 @@
 
 #include <resource_tracking/ResTrack_Dx12.h>
 #include <resource_tracking/GenericDepth_Dx12.h>
+#include <resource_tracking/SpatialPass_Dx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/VkDeviceRules.h>
 #include <native/VkPresentBridge.h>
@@ -2391,6 +2392,7 @@ static void HookToDevice(ID3D12Device* InDevice)
 
     // Observes the depth buffers for the native input producer; nothing is hooked unless [DlssNr] NativeDepthFinder is on.
     GenericDepthDx12::Install(InDevice);
+    SpatialPassDx12::Install(InDevice);
 
     if (State::Instance().activeFgInput == FGInput::Upscaler &&
         !Config::Instance()->FGDisableHUDFix.value_or_default() &&

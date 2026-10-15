@@ -59,6 +59,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Upscalers
         {
+            ReplaceGameFsr1.set_from_config(readBool("Upscalers", "ReplaceGameFsr1"));
             // transform converts only when optional has a value
             Dx11Upscaler.set_from_config(readString("Upscalers", "Dx11Upscaler", true).transform(CodeToUpscaler));
             Dx12Upscaler.set_from_config(readString("Upscalers", "Dx12Upscaler", true).transform(CodeToUpscalerFfx));
@@ -549,6 +550,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
             DlssNrNativeDebugView.set_from_config(readBool("DlssNr", "NativeDebugView"));
+            DlssNrNativeStageTimings.set_from_config(readBool("DlssNr", "NativeStageTimings"));
             DlssNrNativeMotion.set_from_config(readBool("DlssNr", "NativeMotion"));
             DlssNrNativeInput.set_from_config(readBool("DlssNr", "NativeInput"));
             DlssNrNativeUpscaler.set_from_config(readBool("DlssNr", "NativeUpscaler"));
@@ -1213,6 +1215,8 @@ bool Config::SaveIni()
         SaveUpscaler("Dx11Upscaler", Instance()->Dx11Upscaler);
         SaveUpscaler("Dx12Upscaler", Instance()->Dx12Upscaler);
         SaveUpscaler("VulkanUpscaler", Instance()->VulkanUpscaler);
+        ini.SetValue("Upscalers", "ReplaceGameFsr1",
+                     GetBoolValue(Instance()->ReplaceGameFsr1.value_for_config()).c_str());
     }
 
     // Frame Generation
@@ -1632,6 +1636,8 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrNativeDepthOverlay.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDebugView",
                  GetBoolValue(Instance()->DlssNrNativeDebugView.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeStageTimings",
+                 GetBoolValue(Instance()->DlssNrNativeStageTimings.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeMotion", GetBoolValue(Instance()->DlssNrNativeMotion.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeInput", GetBoolValue(Instance()->DlssNrNativeInput.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeUpscaler",

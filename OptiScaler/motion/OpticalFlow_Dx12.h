@@ -64,7 +64,8 @@ class OpticalFlowDx12
     // values mean (see Settings::perceptualLuma).
     bool Dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* color, DXGI_FORMAT colorFormat,
                   ID3D12Resource* depth = nullptr, DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN,
-                  bool depthReversed = true, Encoding encoding = Encoding::Srgb);
+                  bool depthReversed = true, Encoding encoding = Encoding::Srgb, int finestLevel = 0,
+                  int smoothRadius = -1, float jitterX = 0.f, float jitterY = 0.f);
 
     // Forget the previous frame (a scene cut, a resolution change): the next Dispatch only stores its picture.
     void Reset()
@@ -80,10 +81,13 @@ class OpticalFlowDx12
     bool Visualise(ID3D12GraphicsCommandList* list, float maxSpeed);
     ID3D12Resource* Preview() const { return _preview.resource; }
 
-    // The half-resolution luma (R32_FLOAT, NON_PIXEL_SHADER_RESOURCE) of the frame last passed to Dispatch() and of the one
-    // before it; the trust mask compares them. The previous one is only meaningful when FlowValid().
-    ID3D12Resource* LumaOfLastFrame() const { return _pyramid[1 - _current][0].resource; }
-    ID3D12Resource* LumaOfFrameBefore() const { return _pyramid[_current][0].resource; }
+    // The luma at the flow's size (R32_FLOAT, NON_PIXEL_SHADER_RESOURCE) of the frame last passed to Dispatch() and of
+    // the one before it; the trust mask compares them. The previous one is only meaningful when FlowValid().
+    ID3D12Resource* LumaOfLastFrame(int level = 0) const
+    {
+        return _pyramid[1 - _current][_finestLevel + level].resource;
+    }
+    ID3D12Resource* LumaOfFrameBefore() const { return _pyramid[_current][_finestLevel].resource; }
 
     // The flow, in the NON_PIXEL_SHADER_RESOURCE | PIXEL_SHADER_RESOURCE state between Dispatches.
     ID3D12Resource* Flow() const { return _flow.resource; }
@@ -98,6 +102,7 @@ class OpticalFlowDx12
     ID3D12Resource* SceneCutTexture() const { return _sceneCut.Flag(); }
     uint32_t FlowWidth() const { return _flow.width; }
     uint32_t FlowHeight() const { return _flow.height; }
+    int FinestLevel() const { return _finestLevel; }
 
     // Search radius, in pixels of each level, around the coarser level's answer (coarsest level searches kCoarseRadius).
     // Penalty added per pixel of distance from that answer, which keeps flat areas from picking noise.
@@ -108,7 +113,7 @@ class OpticalFlowDx12
         float lambda = 0.03f;
         bool useHistory = true;         // last frame's flow as a candidate
         int coarseCells = 9;            // how many of the coarser level's nearest cells are candidates (1..9: the 3x3)
-        int smoothRadius = 4;           // the edge-aware smoothing of the result, in half-resolution pixels (0 = off)
+        int smoothRadius = 4;           // the edge-aware smoothing of the result, in flow pixels (0 = off)
         float confidenceKnee = 0.004f;  // how much picture structure counts as a trustworthy match
         bool depthMatching = true;      // with depth: the block match counts the window's samples on this pixel's surface
         bool globalCandidate = true;    // the last frame's whole-picture motion is a candidate everywhere
@@ -163,13 +168,15 @@ class OpticalFlowDx12
     Settings& Tuning() { return _settings; }
     const std::string& Error() const { return _error; }
 
-    // Timing, for the GPU test: with a timestamp query heap given, every pass records a timestamp after itself. The
-    // owner resolves the first TimestampCount() entries (the one before the first pass included) and clears the count
-    // before the next Dispatch(); TimestampName(i) names the pass that ended at entry i (entry 0 is the start).
-    void SetTimestampHeap(ID3D12QueryHeap* heap, uint32_t capacity)
+    // Timing, for the GPU test and [DlssNr] NativeStageTimings: with a timestamp query heap given, every pass records a
+    // timestamp after itself, from entry `base` of the heap on. The owner resolves the TimestampCount() entries from
+    // `base` (the one before the first pass included) and clears the count before the next Dispatch();
+    // TimestampName(i) names the pass that ended at entry base + i (entry base + 0 is the start).
+    void SetTimestampHeap(ID3D12QueryHeap* heap, uint32_t capacity, uint32_t base = 0)
     {
         _timeHeap = heap;
         _timeCapacity = capacity;
+        _timeBase = base;
         _timeCount = 0;
     }
     uint32_t TimestampCount() const { return _timeCount; }
@@ -206,11 +213,12 @@ class OpticalFlowDx12
         float stillMargin;    // Match: what the camera must win by where the age is at least stillFrames
         uint32_t lookWeights; // Match, finest level, no depth: the brightness weights (see Settings)
         float lookRange, lookDistance;
-        uint32_t padding[4];
+        float jitterX, jitterY;
+        uint32_t padding[2];
     };
 
     bool CreateTexture(Tex& tex, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name);
-    bool EnsureSize(uint32_t width, uint32_t height);
+    bool EnsureSize(uint32_t width, uint32_t height, int finestLevel);
     void ReleaseTextures();
     void Transition(ID3D12GraphicsCommandList* list, Tex& tex, D3D12_RESOURCE_STATES state);
     void StampBegin(ID3D12GraphicsCommandList* list);
@@ -250,7 +258,7 @@ class OpticalFlowDx12
     Tex _globalFlow; // 1x1: the whole picture's motion in full-resolution pixels, z = 1 when there was enough to say
     Tex _flow;
     Tex _preview;
-    Tex _age[2]; // R8_UINT, half resolution: the still age (see Settings::stillFrames), this frame's and the last one's
+    Tex _age[2]; // R8_UINT, flow resolution: the still age (see Settings::stillFrames), this frame's and the last one's
     bool _ageValid = false; // the last frame's ages are there (not after a Reset or a size change)
     int _current = 0;
     bool _havePrevious = false;
@@ -261,11 +269,13 @@ class OpticalFlowDx12
     // The scene-cut detector, on the first luma level; the last Dispatch ran it, so its flag is this frame's.
     SceneCutDx12 _sceneCut;
     bool _sceneCutRan = false;
+    int _finestLevel = 0;
     uint32_t _width = 0;
     uint32_t _height = 0;
 
     ID3D12QueryHeap* _timeHeap = nullptr;
     uint32_t _timeCapacity = 0;
+    uint32_t _timeBase = 0;
     uint32_t _timeCount = 0;
     const char* _timeNames[64] = {};
 

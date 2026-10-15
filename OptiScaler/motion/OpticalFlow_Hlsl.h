@@ -38,6 +38,7 @@ cbuffer P : register(b0)
     uint lookWeights;       // Match, finest level, no depth: the window's samples count by how near their luma is to the pixel's
     float lookRange;        // ... within this much luma
     float lookDistance;     // ... and a little less with their distance from it, in this level's pixels
+    float2 jitter;          // Luma: the scene's offset in the colour's pixels (0 = none)
 };
 
 SamplerState Linear : register(s0);
@@ -58,12 +59,50 @@ RWTexture2D<uint>   OutAge : register(u1);
 
 )HLSL"
                       F5LOW_LUMA_HLSL
-                      R"HLSL(// Luma of the colour, averaged over 2x2 into the first level.
+                      R"HLSL(// Cubic B-spline reconstruction, widened by the 2:1 luma reduction. Unlike a bilinear
+// de-jitter followed by a box, it rejects detail above the luma Nyquist before decimation, and its
+// bandwidth barely changes with sample phase. Positive adjacent taps combine into one bilinear read.
+float CubicBSpline(float x)
+{
+    x = abs(x);
+    if (x < 1.0)
+        return (4.0 + x * x * (3.0 * x - 6.0)) / 6.0;
+    float t = max(2.0 - x, 0.0);
+    return t * t * t / 6.0;
+}
+
+void LumaTaps(float phase, out float4 weights, out float4 positions)
+{
+    [unroll] for (int i = 0; i < 4; ++i)
+    {
+        float at = 2.0 * i - 3.0;
+        float a = CubicBSpline((at - phase) * 0.5);
+        float b = CubicBSpline((at + 1.0 - phase) * 0.5);
+        weights[i] = (a + b) * 0.5;
+        positions[i] = at + b / (a + b);
+    }
+}
+
+// Luma of the colour, reduced 2:1 into the first level.
 [numthreads(8, 8, 1)]
 void Luma(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= size.x || id.y >= size.y)
         return;
+
+    if (any(jitter != 0))
+    {
+        float4 wx, wy, px, py;
+        LumaTaps(0.5 + jitter.x, wx, px);
+        LumaTaps(0.5 + jitter.y, wy, py);
+        float3 color = 0.0;
+        [unroll] for (int y = 0; y < 4; ++y)
+            [unroll] for (int x = 0; x < 4; ++x)
+                color += wx[x] * wy[y] * Color.SampleLevel(Linear,
+                    (float2(id.xy) * 2.0 + float2(px[x], py[y]) + 0.5) / float2(aux), 0).rgb;
+        OutLuma[id.xy] = LumaOf(color);
+        return;
+    }
 
     float sum = 0.0;
     [unroll] for (int j = 0; j < 2; ++j)

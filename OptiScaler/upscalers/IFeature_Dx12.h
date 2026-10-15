@@ -66,6 +66,15 @@ class IFeature_Dx12 : public virtual IFeature
     bool Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
     bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 
+    // make=false never allocates; Prepare uses make=true before recording into a game list.
+    bool PostPassBuffersReady(ID3D12Resource* output, bool make);
+
+    // Input copies Evaluate may need. Read-only with make=false; make=true is only used by Prepare.
+    virtual bool InputBuffersReady(ID3D12Resource* color, uint32_t renderWidth, uint32_t renderHeight, bool make)
+    {
+        return true;
+    }
+
     API Api() const override { return API::DX12; }
     std::optional<double> ReadUpscalerTime(void* commandQueue) override;
     void ReadDetailedGpuTimes(void* commandQueue, std::vector<DetailedGpuTime>& detailedGpuTimes) override;

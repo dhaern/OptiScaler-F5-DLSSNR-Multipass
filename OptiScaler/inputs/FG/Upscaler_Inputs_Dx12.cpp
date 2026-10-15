@@ -27,7 +27,7 @@ void UpscalerInputsDx12::Reset()
 }
 
 void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters,
-                                      IFeature_Dx12* feature)
+                                      IFeature_Dx12* feature, bool hudFix)
 {
     Hudfix_Dx12::SetSkipStatus(true);
 
@@ -135,7 +135,8 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
     fg->SetReset(reset);
     fg->SetInterpolationRect(feature->DisplayWidth(), feature->DisplayHeight());
 
-    Hudfix_Dx12::UpscaleStart();
+    if (hudFix)
+        Hudfix_Dx12::UpscaleStart();
 
     // FG Prepare
     UINT frameIndex;
@@ -244,7 +245,7 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
 }
 
 void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters,
-                                    IFeature_Dx12* feature)
+                                    IFeature_Dx12* feature, bool hudFix)
 {
     Hudfix_Dx12::SetSkipStatus(false);
 
@@ -256,7 +257,7 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
     // FG Dispatch
     if (fg->IsActive() && Config::Instance()->IsFGEnabled() && State::Instance().currentSwapchain != nullptr)
     {
-        if (Config::Instance()->FGHUDFix.value_or_default())
+        if (hudFix && Config::Instance()->FGHUDFix.value_or_default())
         {
             // For signal after mv & depth copies
             Hudfix_Dx12::UpscaleEnd(feature->FrameCount(), State::Instance().lastFGFrameTime);

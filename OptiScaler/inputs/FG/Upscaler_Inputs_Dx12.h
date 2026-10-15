@@ -12,7 +12,7 @@ class UpscalerInputsDx12
     static void Init(ID3D12Device* device);
     static void Reset();
     static void UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters,
-                             IFeature_Dx12* feature);
+                             IFeature_Dx12* feature, bool hudFix = true);
     static void UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Parameter* InParameters,
-                           IFeature_Dx12* feature);
+                           IFeature_Dx12* feature, bool hudFix = true);
 };

@@ -344,6 +344,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\nvngx\Nvngx_FG.h" />
     <ClInclude Include="fsr4\FSR4ModelSelection.h" />
     <ClInclude Include="hooks\D3D12_Hooks.h" />
+    <ClInclude Include="hooks\ListVtables.h" />
     <ClInclude Include="hooks\DxgiFactory_Hooks.h" />
     <ClInclude Include="hooks\DxvkOutputs.h" />
     <ClInclude Include="hooks\DxgiSwapchainSizing.h" />
@@ -543,14 +544,27 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="proxies\XeFG_Proxy.h" />
     <ClInclude Include="proxies\XeLL_Proxy.h" />
     <ClInclude Include="proxies\Ntdll_Proxy.h" />
+    <ClInclude Include="native\ListStateDx12.h" />
+    <ClInclude Include="native\DescriptorTrackerDx12.h" />
+    <ClInclude Include="native\RootSignatureMap.h" />
     <ClInclude Include="native\DepthFinderCore.h" />
     <ClInclude Include="native\FrameContract.h" />
+    <ClInclude Include="native\Fsr1Signature.h" />
+    <ClInclude Include="native\Fsr1Pass.h" />
+    <ClInclude Include="native\InListPending.h" />
+    <ClInclude Include="native\InListUpscale.h" />
+    <ClInclude Include="native\NativeDriverRoles.h" />
+    <ClInclude Include="native\SpatialEnvelopeDx12.h" />
+    <ClInclude Include="resource_tracking\SpatialPass_Dx12.h" />
+    <ClInclude Include="misc\ThreadTls.h" />
     <ClInclude Include="native\NativeProducer.h" />
+    <ClInclude Include="native\StageTimer_Dx12.h" />
     <ClInclude Include="native\Dx12FrameSource.h" />
     <ClInclude Include="native\SharedFrame.h" />
     <ClInclude Include="native\DepthCopyDx11.h" />
     <ClInclude Include="native\DepthResolveDx12.h" />
     <ClInclude Include="native\DepthSnapshotDx12.h" />
+    <ClInclude Include="native\DepthCopyLedger.h" />
     <ClInclude Include="native\MsaaPictureDx11.h" />
     <ClInclude Include="native\Dx11FrameSource.h" />
     <ClInclude Include="native\SharedFrameVk.h" />
@@ -583,6 +597,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\F5LowShaderBytecode.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_WatchedLists.h" />
     <ClInclude Include="native\VirtualUpscalerHold.h" />
+    <ClInclude Include="native\VirtualUpscalerParams.h" />
     <ClInclude Include="motion\OpticalFlow_Dx12.h" />
     <ClInclude Include="motion\SceneCut_Dx12.h" />
     <ClInclude Include="motion\TrustMask_Dx12.h" />
@@ -866,7 +881,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="nvapi\NvApiHooks.cpp" />
     <ClCompile Include="nvapi\NvApiTypes.cpp" />
     <ClCompile Include="hooks\Reflex_Hooks.cpp" />
+    <ClCompile Include="native\DescriptorTrackerDx12.cpp" />
     <ClCompile Include="native\NativeDriverDx12.cpp" />
+    <ClCompile Include="native\InListUpscale.cpp" />
     <ClCompile Include="native\NativeDriverDx11.cpp" />
     <ClCompile Include="motion\TrustMask_Dx12.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
@@ -933,6 +950,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="native\NativeDriver.cpp" />
     <ClCompile Include="native\NativeLowLatency.cpp" />
     <ClCompile Include="resource_tracking\GenericDepth_Dx12.cpp" />
+    <ClCompile Include="resource_tracking\SpatialPass_Dx12.cpp" />
     <ClCompile Include="resource_tracking\GenericDepth_Dx11.cpp" />
     <ClCompile Include="resource_tracking\ResTrack_dx12.cpp" />
     <ClCompile Include="shaders\hudless_compare\HC_Dx12.cpp" />

@@ -79,6 +79,17 @@ template <class Key> class RebuildSettle
         return true;
     }
 
+    // Predict without advancing the settle frame.
+    bool WouldNow(const Key& built, const Key& wanted, bool flagsOnly, bool firstRealDepth = false) const
+    {
+        if (wanted == built)
+            return false;
+        if (!flagsOnly || firstRealDepth)
+            return true;
+        const uint32_t frames = _frames == 0 || !(wanted == _pending) ? 1 : _frames + 1;
+        return frames >= kKeySettleFrames;
+    }
+
   private:
     Key _pending {};
     uint32_t _frames = 0;

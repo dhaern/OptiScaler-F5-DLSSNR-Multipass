@@ -12,6 +12,7 @@ class RCAS_Dx12 : public Shader_Dx12, public RCAS_Common
 {
   private:
     FrameDescriptorHeap _frameHeaps[RCAS_NUM_OF_HEAPS];
+    bool _inListViewsReady = false;
 
     ID3D12Resource* _buffer = nullptr;
     D3D12_RESOURCE_STATES _bufferState = D3D12_RESOURCE_STATE_COMMON;
@@ -30,6 +31,8 @@ class RCAS_Dx12 : public Shader_Dx12, public RCAS_Common
                                FrameDescriptorHeap& currentHeap);
 
   public:
+    // In-list preparation only: RCAS does not read t2, but its shared static table must have that slot initialized.
+    bool InListViewsReady(bool make);
     bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSource, D3D12_RESOURCE_STATES InState);
     void SetBufferState(ID3D12GraphicsCommandList* InCommandList, D3D12_RESOURCE_STATES InState);
     bool Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InResource, ID3D12Resource* InMotionVectors,

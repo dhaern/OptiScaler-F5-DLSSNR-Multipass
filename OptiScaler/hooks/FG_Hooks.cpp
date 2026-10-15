@@ -20,6 +20,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
 #include <native/NativeDriverDx12.h>
+#include <resource_tracking/SpatialPass_Dx12.h>
 #include <native/NativeLowLatency.h>
 #include <native/PresentStageTiming.h>
 #include <native/VkPresentBridge.h>
@@ -1249,6 +1250,9 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     {
         NativeMotionDx12::OnFGPresent(This, gameQueue, state.currentD3D12Device);
     }
+
+    if (willPresent)
+        SpatialPassDx12::OnFGPresent();
 
     IFGFeature* fg = state.currentFG;
 

@@ -1,3 +1,4 @@
+#include "pch.h"
 // GPU test for OptiScaler/motion/OpticalFlow_Dx12.cpp, no game: a synthetic picture (multi-scale value noise), the same
 // picture moved by a known amount, and the flow the pass reports for it. The picture is a continuous function, so a
 // shift of half a pixel is exact.
@@ -9,6 +10,7 @@
 //
 // Modes: no argument runs every check; "score" prints one summary line for the settings given as key=value; "perf"
 // times a frame at 2560x1440 from the CPU; "passes" times each pass of a frame on the GPU (timestamps) at 2560x1440.
+// "jitter" runs just the fine-ground still sequence and a textured slow pan, with and without scene jitter.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -58,6 +60,24 @@ float Scene(float x, float y, int channel)
 {
     return 0.45f * ValueNoise(x, y, 64, 11 + channel) + 0.25f * ValueNoise(x, y, 24, 23 + channel) +
            0.18f * ValueNoise(x, y, 9, 37 + channel) + 0.12f * ValueNoise(x, y, 4, 51 + channel);
+}
+
+// Far ground: a low-contrast broad pattern under fine, non-repeating detail. Frequencies are in output pixels:
+// at ratio 3 the finest components approach render Nyquist, but none crosses it. Sampling the continuous scene,
+// rather than shifting a saved bitmap, includes the detail changes caused by the game's moving sample positions.
+float groundRatio = 1.0f;
+float GroundScene(float x, float y)
+{
+    float value = 0.35f + 0.25f * Scene(x, y, 0);
+    const float envelope = 0.5f + ValueNoise(x, y, 48.0f, 83);
+    for (int k = 0; k < 12; ++k)
+    {
+        const float angle = 6.2831853f * Hash(k, 0, 89);
+        const float frequency = groundRatio * (0.06f + 0.105f * Hash(k, 1, 89));
+        value += 0.035f * envelope * std::sin(6.2831853f * frequency * (x * std::cos(angle) + y * std::sin(angle)) +
+                                             6.2831853f * Hash(k, 2, 89));
+    }
+    return value;
 }
 
 // A mostly flat picture with a few textured blobs (a wall with a few things on it): across the flat part a block match
@@ -264,6 +284,7 @@ struct Gpu
             for (uint32_t x = 0; x < kWidth; ++x)
             {
                 uint8_t* px = data + (size_t) y * fp.Footprint.RowPitch + x * 4;
+                const float ground = scene == 5 ? GroundScene(x + 0.5f - dx, y + 0.5f - dy) : 0.0f;
                 for (int c = 0; c < 3; ++c)
                 {
                     const bool inSquare = squareSize > 0.0f && x >= squareX && x < squareX + squareSize && y >= squareY &&
@@ -273,6 +294,7 @@ struct Gpu
                                        : scene == 2 ? LinesScene(x - dx, y - dy, c)
                                        : scene == 3 ? LayoutScene(x - dx, y - dy, c, false)
                                        : scene == 4 ? LayoutScene(x - dx, y - dy, c, true)
+                                       : scene == 5 ? ground
                                                     : Scene(x - dx, y - dy, c);
                     float v = (inSquare ? squareOffset + squareGain * base : base) * 255.0f * gain;
                     if (hud == 1 && InHud(x, y))
@@ -529,6 +551,77 @@ CutRead ReadCut(Gpu& gpu, ID3D12Resource* cut)
     return out;
 }
 
+// Two full Halton cycles include the phase wrap. A slow pan of the existing textured scene also checks
+// that jitter cancellation does not suppress real motion. All statistics are in render pixels.
+bool CheckJitter(Gpu& gpu, OpticalFlowDx12& flow)
+{
+    const uint32_t savedWidth = kWidth, savedHeight = kHeight;
+    kWidth = 512;
+    kHeight = 320;
+    auto halton = [](int index, int base)
+    {
+        float value = 0.0f, weight = 1.0f;
+        for (; index; index /= base)
+        {
+            weight /= (float) base;
+            value += weight * (index % base);
+        }
+        return value - 0.5f;
+    };
+    bool ok = true;
+    for (const float ratio : { 1.36f, 3.0f })
+        for (const bool moving : { false, true })
+            for (const bool jittered : { false, true })
+            {
+                groundRatio = ratio;
+                flow.Reset();
+                const int phases = (int) (8.0f * ratio * ratio), frames = 2 * phases + 1;
+                const float vx = moving ? 0.75f : 0.0f, vy = moving ? -0.5f : 0.0f;
+                std::vector<float> errors;
+                uint64_t over = 0;
+                for (int frame = 0; frame < frames; ++frame)
+                {
+                    const int phase = frame % phases + 1;
+                    const float jx = jittered ? halton(phase, 2) : 0.0f;
+                    const float jy = jittered ? halton(phase, 3) : 0.0f;
+                    auto picture = gpu.Picture(frame * vx + jx, frame * vy + jy, 1.0f, 0.0f, 0, 0, 0, 0,
+                                               moving ? 0 : 5);
+                    if (!flow.Dispatch(gpu.list.Get(), picture.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr,
+                                       DXGI_FORMAT_UNKNOWN, true, OpticalFlowDx12::Encoding::Srgb, 1, 2, jx, jy))
+                        return false;
+                    gpu.Submit();
+                    if (frame == 0)
+                        continue;
+                    if (!flow.FlowValid())
+                        return false;
+                    const auto field = ReadFlow(gpu, flow.Flow());
+                    for (uint32_t y = 12; y + 12 < flow.FlowHeight(); ++y)
+                        for (uint32_t x = 12; x + 12 < flow.FlowWidth(); ++x)
+                        {
+                            const size_t at = ((size_t) y * flow.FlowWidth() + x) * 2;
+                            const float error = std::hypot(field[at] + vx, field[at + 1] + vy);
+                            if (!std::isfinite(error))
+                                return false;
+                            errors.push_back(error);
+                            over += error > 0.25f;
+                        }
+                }
+                std::sort(errors.begin(), errors.end());
+                const float p50 = errors[errors.size() / 2], p95 = errors[errors.size() * 95 / 100];
+                const double share = (double) over / errors.size();
+                const bool pass = moving ? p95 <= 0.5f : errors.back() <= 0.25f;
+                printf("scene jitter ratio %.2f, %s, jitter %s, %d frames: error p50 %.4f p95 %.4f max %.4f render px, "
+                       ">0.25 px %.3f%%: %s\n", ratio,
+                       moving ? "textured pan (0.75,-0.5)" : "fine ground still", jittered ? "on" : "off", frames,
+                       p50, p95, errors.back(), 100.0 * share, pass ? "PASS" : "FAIL");
+                ok = ok && pass;
+            }
+    kWidth = savedWidth;
+    kHeight = savedHeight;
+    flow.Reset();
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -623,6 +716,50 @@ int main(int argc, char** argv)
             tuning.hdrWhiteNits = value;
     }
     flow.Tuning() = tuning;
+
+    if (argc > 1 && std::string(argv[1]) == "jitter")
+        return CheckJitter(gpu, flow) ? 0 : 1;
+
+    if (argc > 1 && std::string(argv[1]) == "inlist")
+    {
+        D3D12_QUERY_HEAP_DESC query { D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 64, 0 };
+        ComPtr<ID3D12QueryHeap> heap;
+        if (FAILED(gpu.device->CreateQueryHeap(&query, IID_PPV_ARGS(&heap))))
+            return 1;
+        auto before = gpu.Picture(0, 0), after = gpu.Picture(12, -8);
+        flow.SetTimestampHeap(heap.Get(), 64);
+        flow.Dispatch(gpu.list.Get(), before.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr, DXGI_FORMAT_UNKNOWN, true,
+                      OpticalFlowDx12::Encoding::Srgb, 1, 2);
+        gpu.Submit();
+        flow.ClearTimestamps();
+        bool ok = flow.Dispatch(gpu.list.Get(), after.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, nullptr, DXGI_FORMAT_UNKNOWN,
+                                true, OpticalFlowDx12::Encoding::Srgb, 1, 2) &&
+                  flow.FlowValid();
+        UINT w = (kWidth + 3) / 4, h = (kHeight + 3) / 4, match = 0, down = 0;
+        ok = ok && flow.FlowWidth() == w && flow.FlowHeight() == h;
+        for (int level = 0; level < 5; ++level, w = (w + 1) / 2, h = (h + 1) / 2)
+        {
+            const auto desc = flow.LumaOfLastFrame(level)->GetDesc();
+            ok = ok && desc.Width == w && desc.Height == h;
+        }
+        for (UINT i = 0; i < flow.TimestampCount(); ++i)
+        {
+            match += std::string(flow.TimestampName(i)) == "match";
+            down += std::string(flow.TimestampName(i)) == "down";
+        }
+        ok = ok && match == 5 && down == 5 && flow.TimestampCount() == 16;
+        const auto field = ReadFlow(gpu, flow.Flow());
+        UINT samples = 0, within = 0;
+        for (UINT y = 24; y + 24 < flow.FlowHeight(); ++y)
+            for (UINT x = 24; x + 24 < flow.FlowWidth(); ++x, ++samples)
+                within += std::hypot(field[(y * flow.FlowWidth() + x) * 2] + 12,
+                                     field[(y * flow.FlowWidth() + x) * 2 + 1] - 8) <= 1.0f;
+        ok = ok && samples > 0 && double(within) / samples >= 0.95;
+        printf("in-list: flow %ux%u, 5 pyramid levels checked, %u match/%u down passes, shift (12,-8) within 1 render "
+               "px %.1f%%: %s\n",
+               flow.FlowWidth(), flow.FlowHeight(), match, down, 100.0 * within / samples, ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
 
     // Score mode: the measures under exactly these settings, gathered per kind of scene.
     struct Tally
@@ -1632,6 +1769,8 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    flow.Tuning() = tuning;
+    ok = CheckJitter(gpu, flow) && ok;
     printf(ok ? "all passed\n" : "FAILED\n");
     return ok ? 0 : 1;
 }

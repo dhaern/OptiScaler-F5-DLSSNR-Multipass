@@ -64,7 +64,8 @@ class TrustMaskDx12
     // in picture pixels towards the previous frame (bilinearly, or with depth by surface: Settings::guideSurface). Both
     // rest in NON_PIXEL_SHADER_RESOURCE. The inputs are those of the Dispatch() just before. GuideDepth() is null after
     // a call without depth.
-    bool BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height);
+    bool BuildGuides(ID3D12GraphicsCommandList* list, const Inputs& in, uint32_t width, uint32_t height,
+                     bool copyDepth = true, DXGI_FORMAT motionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT);
     ID3D12Resource* GuideDepth() const { return _guideDepthValid ? _guideDepth.resource : nullptr; }
     ID3D12Resource* GuideMotion() const { return _guideMotion.resource; }
 

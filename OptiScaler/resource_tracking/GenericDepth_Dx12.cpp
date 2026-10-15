@@ -2,9 +2,12 @@
 
 #include "GenericDepth_Dx12.h"
 
+#include <hooks/ListVtables.h>
+#include <native/DepthCopyLedger.h>
 #include <native/DepthFinderCore.h>
 #include <native/DepthResolveDx12.h>
 #include <native/DepthSnapshotDx12.h>
+#include <native/NativeDriverRoles.h>
 
 #include <Config.h>
 #include <Util.h>
@@ -19,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <format>
+#include <intrin.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -85,6 +89,20 @@ PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 PFN_Dispatch o_Dispatch = nullptr;
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
 PFN_Close o_Close = nullptr;
+using PFN_ResourceBarrier = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
+using PFN_Discard = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12Resource*, const D3D12_DISCARD_REGION*);
+PFN_ResourceBarrier o_ResourceBarrier = nullptr;
+PFN_Discard o_DiscardResource = nullptr;
+typedef HRESULT(STDMETHODCALLTYPE* PFN_Reset)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*,
+                                              ID3D12PipelineState*);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateCommandList)(ID3D12Device*, UINT, D3D12_COMMAND_LIST_TYPE,
+                                                          ID3D12CommandAllocator*, ID3D12PipelineState*, REFIID,
+                                                          void**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateCommandList1)(ID3D12Device4*, UINT, D3D12_COMMAND_LIST_TYPE,
+                                                           D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
+PFN_Reset o_Reset = nullptr;
+PFN_CreateCommandList o_CreateCommandList = nullptr;
+PFN_CreateCommandList1 o_CreateCommandList1 = nullptr;
 
 struct DsvInfo
 {
@@ -139,10 +157,18 @@ struct SnapshotSlot
     ID3D12Resource* multisampled = nullptr; // a multisampled buffer's copy as it is; `resource` is its resolve
     uint64_t vertices = 0;           // what the stretch it holds had drawn
     bool reversed = false; // the pick's depth direction when it was taken (picks which sample a resolve keeps)
+    uint64_t list = 0, pick = 0;
+    D3D12_RESOURCE_STATES pendingState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 };
 
 SnapshotSlot g_slots[kSnapshotSlots];
-int g_slotsUsed = 0;                 // taken this frame
+constinit native::DepthCopySlots g_copies;
+static_assert(native::DepthCopySlots::kSlots == kSnapshotSlots);
+struct CopyCounts
+{
+    uint64_t copies = 0, repeated = 0, frames = 0;
+} g_copyCounts;
+bool g_saidHandedOut = false, g_saidAcrossPresent = false;
 GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 int g_bestSlots[kSnapshotSlots] = {}; // which slots g_best.copies are, in the same order
 uint64_t g_resolvedFrame = ~0ull;     // the g_best.frame whose multisampled copies were resolved
@@ -311,7 +337,7 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     if (g_backup.readback != nullptr)
         g_retired.emplace_back(g_backup.readback, g_core.Presents());
 
-    g_slotsUsed = 0;
+    g_copies.Remade(!resolveLater);
     g_best = GenericDepthDx12::Snapshot {};
     g_previewFrame = 0;
     g_resolvedFrame = ~0ull;
@@ -329,12 +355,8 @@ constexpr D3D12_RESOURCE_STATES kSlotRest =
 
 // Under g_mutex. A slot to copy into: made when it is first needed, in the state it rests in between frames. The depth is
 // read by compute passes and, for the menu, pixel shaders, so it rests readable by both.
-SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
+bool MakeSlot(SnapshotSlot& slot, ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
 {
-    if (g_slotsUsed >= kSnapshotSlots)
-        return nullptr;
-
-    SnapshotSlot& slot = g_slots[g_slotsUsed];
 
     if (slot.resource == nullptr)
     {
@@ -359,7 +381,7 @@ SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
 
         if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, kSlotRest, nullptr,
                                                    IID_PPV_ARGS(&slot.resource))))
-            return nullptr;
+            return false;
 
         // The copy as it is: the same format family and samples as the game's buffer, resting where the resolve reads
         // it.
@@ -376,13 +398,57 @@ SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
             {
                 slot.resource->Release();
                 slot.resource = nullptr;
-                return nullptr;
+                return false;
             }
         }
     }
 
-    ++g_slotsUsed;
-    return &slot;
+    return true;
+}
+
+SnapshotSlot* TakeSlot(ID3D12GraphicsCommandList* list, ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
+{
+    const int taken =
+        g_copies.Take((uint64_t) (size_t) list, [&](int index) { return MakeSlot(g_slots[index], device, source); });
+    return taken >= 0 ? &g_slots[taken] : nullptr;
+}
+
+void NoteCopy(SnapshotSlot* slot, ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool singleSample)
+{
+    const int index = (int) (slot - g_slots);
+    const uint64_t listId = (uint64_t) (size_t) list, pick = (uint64_t) (size_t) source;
+    for (int i = 0; i < index; ++i)
+        if (g_slots[i].list == listId && g_slots[i].pick == pick)
+        {
+            ++g_copyCounts.repeated;
+            break;
+        }
+    ++g_copyCounts.copies;
+    slot->list = listId;
+    slot->pick = pick;
+    g_copies.Recorded(index, listId, pick, slot->vertices, slot->reversed, singleSample);
+}
+
+// Clear the pending marker before emitting barriers: the runtime can forward them through our hooks again.
+void ResolvePending(ID3D12GraphicsCommandList* list, ID3D12Resource* source = nullptr, bool acquire = false)
+{
+    std::unique_lock lock(g_mutex, std::defer_lock);
+    if (acquire && g_copies.Pending((uint64_t) (size_t) list) >= 0)
+        lock.lock();
+    const int index = g_copies.Pending((uint64_t) (size_t) list);
+    if (index < 0 || (source != nullptr && g_slots[index].pick != (uint64_t) (size_t) source))
+        return;
+    auto& slot = g_slots[index];
+    source = (ID3D12Resource*) (size_t) slot.pick;
+    g_copies.Pending(index, 0);
+    if (const char* failed = native::RecordDepthResolve(list, source, slot.pendingState, slot.resource, kSlotRest,
+                                                        g_backup.view, slot.reversed))
+    {
+        g_copies.GiveBack(index);
+        SayOnce("resolveFailed", std::format("a copy could not be resolved in the game's list ({})", failed));
+    }
+    else
+        g_copies.Resolved(index);
 }
 
 // Under g_mutex, from a hook, before the clear itself or at the point the list leaves the buffer or closes: the buffer
@@ -456,12 +522,28 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
         }
     }
 
-    SnapshotSlot* slot = TakeSlot(device, desc);
+    const uint64_t listId = (uint64_t) (size_t) list, pick = (uint64_t) (size_t) source;
+    bool lazy = g_backup.resolveInList && Config::Instance()->ReplaceGameFsr1.value_or_default() &&
+                std::string_view(where) == "unbind";
+    const int pending = g_copies.Pending(listId);
+    if (lazy && pending >= 0 && g_slots[pending].pick == pick)
+    {
+        auto& slot = g_slots[pending];
+        slot.vertices = std::max(slot.vertices, stretchVertices);
+        g_copies.Recorded(pending, listId, pick, slot.vertices, reversed, false);
+        device->Release();
+        return;
+    }
+    ResolvePending(list);
+    for (int i = 0; i < g_copies.Used(); ++i)
+        if (g_slots[i].pick == pick && g_slots[i].list != listId)
+            lazy = false;
+    SnapshotSlot* slot = TakeSlot(list, device, desc);
     device->Release();
 
     if (slot == nullptr)
     {
-        SayOnce("slot", g_slotsUsed >= kSnapshotSlots
+        SayOnce("slot", g_copies.Used() >= kSnapshotSlots
                             ? std::format("more than {} copies in one frame; the rest are skipped", kSnapshotSlots)
                             : std::string("a copy target could not be made; the copy is skipped"));
         return;
@@ -477,19 +559,13 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
 
     slot->vertices = stretchVertices;
     slot->reversed = reversed;
-
-    // Standard pattern: one resolve in the game's list straight into the slot, no multisampled copy and no extra pass.
     if (g_backup.resolveInList)
     {
-        if (const char* failed = native::RecordDepthResolve(list, source, depthState, slot->resource, kSlotRest,
-                                                            g_backup.view, reversed))
-        {
-            // Checked above, so not expected. Nothing was recorded and the slot (the last one taken) holds no depth of
-            // this frame: give it back so it is not read.
-            --g_slotsUsed;
-            SayOnce("resolveFailed", std::format("a copy could not be resolved in the game's list ({})", failed));
-        }
-
+        slot->pendingState = depthState;
+        NoteCopy(slot, list, source, false);
+        g_copies.Pending((int) (slot - g_slots), listId);
+        if (!lazy)
+            ResolvePending(list);
         return;
     }
 
@@ -532,6 +608,7 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     D3D12_RESOURCE_BARRIER out[2] = { barrier(source, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
                                       barrier(target, all, D3D12_RESOURCE_STATE_COPY_DEST, targetRest) };
     list->ResourceBarrier(2, out);
+    NoteCopy(slot, list, source, slot->multisampled == nullptr);
 }
 
 void STDMETHODCALLTYPE hkCreateDepthStencilView(ID3D12Device* This, ID3D12Resource* pResource,
@@ -665,6 +742,7 @@ void OnClear(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE DepthS
         if (found == g_dsv.end() || found->second.resource == nullptr)
             return;
 
+        ResolvePending(This, found->second.resource);
         buffer.id = (uint64_t) (size_t) found->second.resource;
         buffer.width = found->second.width;
         buffer.height = found->second.height;
@@ -684,189 +762,115 @@ void OnIndirect(ID3D12GraphicsCommandList* This, UINT MaxCommandCount)
 // draws the world after the clear and ends the list there) is copied here, in the state the view says the buffer is in.
 void OnClose(ID3D12GraphicsCommandList* This)
 {
+    ResolvePending(This, nullptr, true);
     TakeSnapshot(This, g_core.OnContextEnd((uint64_t) (size_t) This));
-}
-
-// ---- Game command lists with a vtable of their own ----------------------------------------------------------------------
-// Witcher 3 (2026-10-04): its command lists each carry a copy of the vtable in heap memory whose DrawInstanced and
-// DrawIndexedInstanced point into another module's code, while OMSetRenderTargets is the runtime's own. The hooks on the
-// runtime's functions then never see a draw. So the first time a list is seen, an entry of its table that is not the
-// runtime's own is replaced by a thunk that counts and calls what was there. A table whose entries are the runtime's own is
-// left alone: the hooks above already cover it, and patching it as well would count every draw twice.
-enum Slot
-{
-    kDraw = 0,
-    kDrawIndexed,
-    kViewports,
-    kClear,
-    kIndirect,
-    kClose,
-    kSlots
-};
-constexpr int kSlotIndex[kSlots] = { 12, 13, 21, 47, 59, 9 };
-constexpr const char* kSlotName[kSlots] = { "DrawInstanced", "DrawIndexedInstanced", "RSSetViewports",
-                                            "ClearDepthStencilView", "ExecuteIndirect", "Close" };
-
-struct TablePatch
-{
-    PVOID previous[kSlots] {};
-};
-
-PVOID* g_installTable = nullptr; // the runtime's own table, read at install
-std::unordered_map<PVOID*, TablePatch> g_patched;
-std::unordered_map<PVOID*, bool> g_examined;
-int g_patchLogs = 0;
-
-PVOID PreviousOf(ID3D12GraphicsCommandList* list, int slot)
-{
-    PVOID* table = *(PVOID**) list;
-    std::lock_guard lock(g_mutex);
-    const auto found = g_patched.find(table);
-    return found != g_patched.end() ? found->second.previous[slot] : nullptr;
-}
-
-void STDMETHODCALLTYPE hkTableDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
-                                            UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
-{
-    OnDraw(This, VertexCountPerInstance, InstanceCount);
-
-    if (auto previous = (PFN_DrawInstanced) PreviousOf(This, kDraw))
-        previous(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
-}
-
-void STDMETHODCALLTYPE hkTableDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT IndexCountPerInstance,
-                                                   UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
-                                                   UINT StartInstanceLocation)
-{
-    OnDraw(This, IndexCountPerInstance, InstanceCount);
-
-    if (auto previous = (PFN_DrawIndexedInstanced) PreviousOf(This, kDrawIndexed))
-        previous(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
-                 StartInstanceLocation);
-}
-
-void STDMETHODCALLTYPE hkTableRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
-                                             const D3D12_VIEWPORT* pViewports)
-{
-    OnViewports(This, NumViewports, pViewports);
-
-    if (auto previous = (PFN_RSSetViewports) PreviousOf(This, kViewports))
-        previous(This, NumViewports, pViewports);
-}
-
-void STDMETHODCALLTYPE hkTableClearDepthStencilView(ID3D12GraphicsCommandList* This,
-                                                    D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView,
-                                                    D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
-                                                    UINT NumRects, const D3D12_RECT* pRects)
-{
-    if (g_core.Active())
-        OnClear(This, DepthStencilView, ClearFlags, Depth);
-
-    if (auto previous = (PFN_ClearDepthStencilView) PreviousOf(This, kClear))
-        previous(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
-}
-
-void STDMETHODCALLTYPE hkTableExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12CommandSignature* pCommandSignature,
-                                              UINT MaxCommandCount, ID3D12Resource* pArgumentBuffer,
-                                              UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
-                                              UINT64 CountBufferOffset)
-{
-    if (g_core.Active())
-        OnIndirect(This, MaxCommandCount);
-
-    if (auto previous = (PFN_ExecuteIndirect) PreviousOf(This, kIndirect))
-        previous(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
-                 CountBufferOffset);
-}
-
-HRESULT STDMETHODCALLTYPE hkTableClose(ID3D12GraphicsCommandList* This)
-{
-    OnClose(This);
-
-    if (auto previous = (PFN_Close) PreviousOf(This, kClose))
-        return previous(This);
-
-    return E_FAIL;
-}
-
-const PVOID kTableHooks[kSlots] = { (PVOID) hkTableDrawInstanced, (PVOID) hkTableDrawIndexedInstanced,
-                                    (PVOID) hkTableRSSetViewports, (PVOID) hkTableClearDepthStencilView,
-                                    (PVOID) hkTableExecuteIndirect, (PVOID) hkTableClose };
-
-void PatchListTable(ID3D12GraphicsCommandList* list)
-{
-    PVOID* table = *(PVOID**) list;
-
-    if (table == nullptr || table == g_installTable)
-        return;
-
+    const uint64_t listId = (uint64_t) (size_t) This;
+    // Close ends the recording even when Reset follows without execution. Deferred MSAA copies never enter this ledger.
+    if (g_copies.MayHold(listId))
     {
         std::lock_guard lock(g_mutex);
-
-        if (!g_examined.emplace(table, true).second)
-            return;
+        g_copies.Closed(listId);
     }
+}
 
-    TablePatch patch;
-    bool any = false;
+struct DepthTag;
+constinit native::ListVtables<DepthTag> g_listTables;
+PVOID* g_installTable = nullptr;
+std::atomic<int> g_patchLogs { 0 };
+constexpr int kSlotIndex[] = { 12, 13, 21, 47, 59, 9 };
+constexpr const char* kSlotName[] = { "DrawInstanced",         "DrawIndexedInstanced", "RSSetViewports",
+                                      "ClearDepthStencilView", "ExecuteIndirect",      "Close" };
 
-    for (int slot = 0; slot < kSlots; ++slot)
-    {
-        PVOID entry = table[kSlotIndex[slot]];
+bool ListThreadHasNoTls()
+{
+#if defined(_M_X64)
+    return __readgsqword(0x58) == 0;
+#elif defined(_M_IX86)
+    return __readfsdword(0x2c) == 0;
+#else
+    return false;
+#endif
+}
 
-        if (g_installTable != nullptr && entry != g_installTable[kSlotIndex[slot]] && entry != kTableHooks[slot])
-        {
-            patch.previous[slot] = entry;
-            any = true;
-        }
-    }
-
-    if (!any)
+void ExamineList(ID3D12GraphicsCommandList* list)
+{
+    if (!g_installed || ListThreadHasNoTls())
         return;
-
-    {
-        std::lock_guard lock(g_mutex);
-        g_patched[table] = patch; // before the entries change, so a thunk that runs at once finds what to call
-    }
-
+    bool first = false;
+    g_listTables.Examine(list, &first);
+    if (!first || g_patchLogs.fetch_add(1, std::memory_order_relaxed) >= 6)
+        return;
+    std::string which;
     int patched = 0;
-
-    for (int slot = 0; slot < kSlots; ++slot)
-    {
-        if (patch.previous[slot] == nullptr)
-            continue;
-
-        PVOID* entry = &table[kSlotIndex[slot]];
-        DWORD old = 0;
-
-        if (VirtualProtect(entry, sizeof(PVOID), PAGE_READWRITE, &old))
+    for (size_t slot = 0; slot < std::size(kSlotIndex); ++slot)
+        if (PVOID previous = g_listTables.Original(list, kSlotIndex[slot], (PVOID) nullptr))
         {
-            InterlockedExchangePointer(entry, kTableHooks[slot]);
-            DWORD ignored = 0;
-            VirtualProtect(entry, sizeof(PVOID), old, &ignored);
+            which += std::format(" {}={:X}", kSlotName[slot], (size_t) previous);
             ++patched;
         }
-    }
+    LOG_INFO("Depth finder: a game command list has a vtable of its own ({:X}); {} entries now count through us, they "
+             "pointed at:{}",
+             (size_t) *(PVOID**) list, patched, which);
+}
 
-    if (g_patchLogs++ < 6)
+void ExamineCreated(void* created)
+{
+    if (created == nullptr || ListThreadHasNoTls())
+        return;
+    ID3D12GraphicsCommandList* list = nullptr;
+    if (SUCCEEDED(static_cast<IUnknown*>(created)->QueryInterface(IID_PPV_ARGS(&list))))
     {
-        std::string which;
-
-        for (int slot = 0; slot < kSlots; ++slot)
-            if (patch.previous[slot] != nullptr)
-                which += std::format(" {}={:X}", kSlotName[slot], (size_t) patch.previous[slot]);
-
-        LOG_INFO("Depth finder: a game command list has a vtable of its own ({:X}); {} entries now count through us, they "
-                 "pointed at:{}",
-                 (size_t) table, patched, which);
+        ID3D12GraphicsCommandList* realList = nullptr;
+        if (!Util::CheckForRealObject(__FUNCTION__, list, (IUnknown**) &realList))
+            realList = list;
+        ExamineList(realList);
+        list->Release();
     }
 }
 
-void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT NumRenderTargetDescriptors,
+HRESULT STDMETHODCALLTYPE hkCreateCommandList(ID3D12Device* This, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type,
+                                              ID3D12CommandAllocator* allocator, ID3D12PipelineState* initialState,
+                                              REFIID iid, void** list)
+{
+    const HRESULT hr = o_CreateCommandList(This, nodeMask, type, allocator, initialState, iid, list);
+    if (SUCCEEDED(hr) && list != nullptr)
+        ExamineCreated(*list);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hkCreateCommandList1(ID3D12Device4* This, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type,
+                                               D3D12_COMMAND_LIST_FLAGS flags, REFIID iid, void** list)
+{
+    const HRESULT hr = o_CreateCommandList1(This, nodeMask, type, flags, iid, list);
+    if (SUCCEEDED(hr) && list != nullptr)
+        ExamineCreated(*list);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hkReset(ID3D12GraphicsCommandList* This, ID3D12CommandAllocator* allocator,
+                                  ID3D12PipelineState* initialState)
+{
+    ExamineList(This);
+    ResolvePending(This, nullptr, true);
+    const HRESULT hr = o_Reset(This, allocator, initialState);
+    if (SUCCEEDED(hr))
+        ExamineList(This);
+    return hr;
+}
+
+void STDMETHODCALLTYPE hkOMSetRenderTargets(PFN_OMSetRenderTargets original, ID3D12GraphicsCommandList* This,
+                                            UINT NumRenderTargetDescriptors,
                                             const D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
                                             BOOL RTsSingleHandleToDescriptorRange,
                                             const D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
+                 pDepthStencilDescriptor);
+        return;
+    }
+    ExamineList(This);
     static std::atomic<int> logged { 0 };
 
     if (logged.load(std::memory_order_relaxed) < 4 && logged.fetch_add(1) < 4)
@@ -880,8 +884,6 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
                  g_installTable ? (size_t) g_installTable[46] : 0);
     }
 
-    if (g_core.Active())
-        PatchListTable(This);
 
     if (g_core.Active())
     {
@@ -896,6 +898,8 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
 
             if (found != g_dsv.end() && found->second.resource != nullptr)
             {
+                if (!found->second.readOnlyDepth)
+                    ResolvePending(This, found->second.resource);
                 buffer.id = (uint64_t) (size_t) found->second.resource;
                 buffer.width = found->second.width;
                 buffer.height = found->second.height;
@@ -909,68 +913,111 @@ void STDMETHODCALLTYPE hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UIN
         TakeSnapshot(This, g_core.OnDepthBound((uint64_t) (size_t) This, pDepthStencilDescriptor != nullptr, bound));
     }
 
-    o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
-                         pDepthStencilDescriptor);
+    original(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
+             pDepthStencilDescriptor);
 }
 
-void STDMETHODCALLTYPE hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
+void STDMETHODCALLTYPE hkRSSetViewports(PFN_RSSetViewports original, ID3D12GraphicsCommandList* This, UINT NumViewports,
                                         const D3D12_VIEWPORT* pViewports)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, NumViewports, pViewports);
+        return;
+    }
+    ExamineList(This);
     OnViewports(This, NumViewports, pViewports);
 
-    o_RSSetViewports(This, NumViewports, pViewports);
+    original(This, NumViewports, pViewports);
 }
 
-void STDMETHODCALLTYPE hkClearDepthStencilView(ID3D12GraphicsCommandList* This,
+void STDMETHODCALLTYPE hkClearDepthStencilView(PFN_ClearDepthStencilView original, ID3D12GraphicsCommandList* This,
                                                D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView,
-                                               D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil,
-                                               UINT NumRects, const D3D12_RECT* pRects)
+                                               D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil, UINT NumRects,
+                                               const D3D12_RECT* pRects)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+        return;
+    }
+    ExamineList(This);
     OnClear(This, DepthStencilView, ClearFlags, Depth);
 
-    o_ClearDepthStencilView(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    original(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
 }
 
-void STDMETHODCALLTYPE hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance,
-                                       UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
+void STDMETHODCALLTYPE hkDrawInstanced(PFN_DrawInstanced original, ID3D12GraphicsCommandList* This,
+                                       UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation,
+                                       UINT StartInstanceLocation)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+        return;
+    }
+    ExamineList(This);
     OnDraw(This, VertexCountPerInstance, InstanceCount);
-    o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    original(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 }
 
-void STDMETHODCALLTYPE hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT IndexCountPerInstance,
-                                              UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
-                                              UINT StartInstanceLocation)
+void STDMETHODCALLTYPE hkDrawIndexedInstanced(PFN_DrawIndexedInstanced original, ID3D12GraphicsCommandList* This,
+                                              UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation,
+                                              INT BaseVertexLocation, UINT StartInstanceLocation)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
+                 StartInstanceLocation);
+        return;
+    }
+    ExamineList(This);
     OnDraw(This, IndexCountPerInstance, InstanceCount);
-    o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
-                           StartInstanceLocation);
+    original(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
 }
 
 // ExecuteIndirect carries draws, dispatches and mesh dispatches alike, and the command signature that says which is not
 // followed here: with a depth buffer bound it is counted as indirect draws (up to MaxCommandCount), which is a guess for a
 // dispatch issued while one happens to be bound. ReShade's add-on tells them apart through the API's own indirect type.
-void STDMETHODCALLTYPE hkExecuteIndirect(ID3D12GraphicsCommandList* This, ID3D12CommandSignature* pCommandSignature,
-                                         UINT MaxCommandCount, ID3D12Resource* pArgumentBuffer,
-                                         UINT64 ArgumentBufferOffset, ID3D12Resource* pCountBuffer,
-                                         UINT64 CountBufferOffset)
+void STDMETHODCALLTYPE hkExecuteIndirect(PFN_ExecuteIndirect original, ID3D12GraphicsCommandList* This,
+                                         ID3D12CommandSignature* pCommandSignature, UINT MaxCommandCount,
+                                         ID3D12Resource* pArgumentBuffer, UINT64 ArgumentBufferOffset,
+                                         ID3D12Resource* pCountBuffer, UINT64 CountBufferOffset)
 {
+    if (ListThreadHasNoTls())
+    {
+        original(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
+                 CountBufferOffset);
+        return;
+    }
+    ExamineList(This);
     OnIndirect(This, MaxCommandCount);
 
-    o_ExecuteIndirect(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
-                      CountBufferOffset);
+    original(This, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer,
+             CountBufferOffset);
 }
 
-HRESULT STDMETHODCALLTYPE hkClose(ID3D12GraphicsCommandList* This)
+HRESULT STDMETHODCALLTYPE hkClose(PFN_Close original, ID3D12GraphicsCommandList* This)
 {
+    if (ListThreadHasNoTls())
+    {
+        return original(This);
+    }
+    ExamineList(This);
     OnClose(This);
 
-    return o_Close(This);
+    return original(This);
 }
 
 void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
                                     UINT ThreadGroupCountZ)
 {
+    if (ListThreadHasNoTls())
+    {
+        o_Dispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+        return;
+    }
+    ExamineList(This);
     if (g_core.Active())
         g_core.Counters().dispatches.fetch_add(1, std::memory_order_relaxed);
 
@@ -979,11 +1026,49 @@ void STDMETHODCALLTYPE hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGr
 
 void STDMETHODCALLTYPE hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList)
 {
+    if (ListThreadHasNoTls())
+    {
+        o_ExecuteBundle(This, pCommandList);
+        return;
+    }
+    ExamineList(This);
     if (g_core.Active())
         g_core.Counters().bundles.fetch_add(1, std::memory_order_relaxed);
 
     o_ExecuteBundle(This, pCommandList);
 }
+
+void STDMETHODCALLTYPE hkResourceBarrier(PFN_ResourceBarrier original, ID3D12GraphicsCommandList* list, UINT count,
+                                         const D3D12_RESOURCE_BARRIER* barriers)
+{
+    ExamineList(list);
+    if (!ListThreadHasNoTls())
+        for (UINT i = 0; i < count; ++i)
+            ResolvePending(list,
+                           barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ? barriers[i].Transition.pResource
+                           : barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING
+                               ? barriers[i].Aliasing.pResourceBefore
+                               : barriers[i].UAV.pResource,
+                           true);
+    original(list, count, barriers);
+}
+void STDMETHODCALLTYPE hkDiscardResource(PFN_Discard original, ID3D12GraphicsCommandList* list,
+                                         ID3D12Resource* resource, const D3D12_DISCARD_REGION* region)
+{
+    ExamineList(list);
+    if (!ListThreadHasNoTls())
+        ResolvePending(list, resource, true);
+    original(list, resource, region);
+}
+using DepthBarrier = native::ListVtableHook<g_listTables, 26, &o_ResourceBarrier, hkResourceBarrier>;
+using DepthDiscard = native::ListVtableHook<g_listTables, 51, &o_DiscardResource, hkDiscardResource>;
+using DepthBind = native::ListVtableHook<g_listTables, 46, &o_OMSetRenderTargets, hkOMSetRenderTargets>;
+using DepthDraw = native::ListVtableHook<g_listTables, 12, &o_DrawInstanced, hkDrawInstanced>;
+using DepthDrawIndexed = native::ListVtableHook<g_listTables, 13, &o_DrawIndexedInstanced, hkDrawIndexedInstanced>;
+using DepthViewports = native::ListVtableHook<g_listTables, 21, &o_RSSetViewports, hkRSSetViewports>;
+using DepthClear = native::ListVtableHook<g_listTables, 47, &o_ClearDepthStencilView, hkClearDepthStencilView>;
+using DepthIndirect = native::ListVtableHook<g_listTables, 59, &o_ExecuteIndirect, hkExecuteIndirect>;
+using DepthClose = native::ListVtableHook<g_listTables, 9, &o_Close, hkClose>;
 
 } // namespace
 
@@ -994,7 +1079,9 @@ bool InstallFailed() { return g_installFailed; }
 
 void Install(ID3D12Device* device)
 {
-    if (device == nullptr || g_installed || !Config::Instance()->DlssNrNativeDepthFinder.value_or_default())
+    if (device == nullptr || g_installed ||
+        !native::roles::DepthFinderWanted(Config::Instance()->DlssNrNativeDepthFinder.value_or_default(),
+                                          Config::Instance()->ReplaceGameFsr1.value_or_default()))
         return;
 
     ID3D12CommandAllocator* allocator = nullptr;
@@ -1028,6 +1115,16 @@ void Install(ID3D12Device* device)
     PVOID* deviceTable = *(PVOID**) realDevice;
     PVOID* listTable = *(PVOID**) realList;
 
+    o_CreateCommandList = (PFN_CreateCommandList) deviceTable[12];
+    ID3D12Device4* device4 = nullptr;
+    if (SUCCEEDED(realDevice->QueryInterface(IID_PPV_ARGS(&device4))))
+    {
+        o_CreateCommandList1 = (PFN_CreateCommandList1) (*(PVOID**) device4)[51];
+        device4->Release();
+    }
+    o_Reset = (PFN_Reset) listTable[10];
+    o_ResourceBarrier = (PFN_ResourceBarrier) listTable[26];
+    o_DiscardResource = (PFN_Discard) listTable[51];
     o_CreateDepthStencilView = (PFN_CreateDepthStencilView) deviceTable[21];
     o_CopyDescriptors = (PFN_CopyDescriptors) deviceTable[23];
     o_CopyDescriptorsSimple = (PFN_CopyDescriptorsSimple) deviceTable[24];
@@ -1044,6 +1141,14 @@ void Install(ID3D12Device* device)
     o_Dispatch = (PFN_Dispatch) listTable[14];
     o_Close = (PFN_Close) listTable[9];
     g_installTable = listTable;
+    g_listTables.SetLog([](const char* why) { LOG_WARN("Depth finder: command-list vtables: {}", why); });
+    g_listTables.Install(listTable);
+    g_listTables.Hook(12, (PVOID) DepthDraw::Table);
+    g_listTables.Hook(13, (PVOID) DepthDrawIndexed::Table);
+    g_listTables.Hook(21, (PVOID) DepthViewports::Table);
+    g_listTables.Hook(47, (PVOID) DepthClear::Table);
+    g_listTables.Hook(59, (PVOID) DepthIndirect::Table);
+    g_listTables.Hook(9, (PVOID) DepthClose::Table);
 
     // Is a bundle's DrawInstanced the same code as the direct list's? If not, draws recorded in bundles are invisible to the
     // draw hooks (a bundle inherits the caller's depth buffer, so they would have to be counted at ExecuteBundle).
@@ -1076,18 +1181,30 @@ void Install(ID3D12Device* device)
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
+    DetourAttach(&(PVOID&) o_CreateCommandList, hkCreateCommandList);
+    if (o_CreateCommandList1 != nullptr)
+        DetourAttach(&(PVOID&) o_CreateCommandList1, hkCreateCommandList1);
+    DetourAttach(&(PVOID&) o_Reset, hkReset);
     DetourAttach(&(PVOID&) o_CreateDepthStencilView, hkCreateDepthStencilView);
     DetourAttach(&(PVOID&) o_CopyDescriptors, hkCopyDescriptors);
     DetourAttach(&(PVOID&) o_CopyDescriptorsSimple, hkCopyDescriptorsSimple);
-    DetourAttach(&(PVOID&) o_DrawInstanced, hkDrawInstanced);
-    DetourAttach(&(PVOID&) o_DrawIndexedInstanced, hkDrawIndexedInstanced);
-    DetourAttach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
-    DetourAttach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
-    DetourAttach(&(PVOID&) o_ClearDepthStencilView, hkClearDepthStencilView);
-    DetourAttach(&(PVOID&) o_ExecuteIndirect, hkExecuteIndirect);
+    DetourAttach(&(PVOID&) o_DrawInstanced, DepthDraw::Detour);
+    DetourAttach(&(PVOID&) o_DrawIndexedInstanced, DepthDrawIndexed::Detour);
+    DetourAttach(&(PVOID&) o_RSSetViewports, DepthViewports::Detour);
+    DetourAttach(&(PVOID&) o_OMSetRenderTargets, DepthBind::Detour);
+    if (Config::Instance()->ReplaceGameFsr1.value_or_default())
+    {
+        g_listTables.Hook(26, (PVOID) DepthBarrier::Table);
+        g_listTables.Hook(51, (PVOID) DepthDiscard::Table);
+        g_listTables.Hook(46, (PVOID) DepthBind::Table);
+        DetourAttach(&(PVOID&) o_ResourceBarrier, DepthBarrier::Detour);
+        DetourAttach(&(PVOID&) o_DiscardResource, DepthDiscard::Detour);
+    }
+    DetourAttach(&(PVOID&) o_ClearDepthStencilView, DepthClear::Detour);
+    DetourAttach(&(PVOID&) o_ExecuteIndirect, DepthIndirect::Detour);
     DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
     DetourAttach(&(PVOID&) o_Dispatch, hkDispatch);
-    DetourAttach(&(PVOID&) o_Close, hkClose);
+    DetourAttach(&(PVOID&) o_Close, DepthClose::Detour);
 
     const auto result = DetourTransactionCommit();
 
@@ -1098,6 +1215,9 @@ void Install(ID3D12Device* device)
     if (result != NO_ERROR)
     {
         LOG_ERROR("Depth finder: hooking failed ({:X}), not installed", (UINT) result);
+        o_CreateCommandList = nullptr;
+        o_CreateCommandList1 = nullptr;
+        o_Reset = nullptr;
         o_CreateDepthStencilView = nullptr;
         o_CopyDescriptors = nullptr;
         o_CopyDescriptorsSimple = nullptr;
@@ -1139,6 +1259,14 @@ void OnPresent(IDXGISwapChain* swapChain)
     // Part one in the core: the frame's counts are closed and the floor for what is worth copying is found.
     const uint64_t presents = g_core.BeginPresent(desc.BufferDesc.Width, desc.BufferDesc.Height);
     const auto pick = g_core.CurrentPick();
+    if (presents % 600 == 0)
+    {
+        const auto counts = g_listTables.TakeCounts();
+        LOG_INFO("Depth finder: command-list vtables: {} tables, {} patched, {} repatched, {} newly wrapped by another "
+                 "patcher, "
+                 "{} refusals",
+                 counts.tables, counts.patched, counts.repatched, counts.foreign, counts.failed);
+    }
 
     {
         std::lock_guard lock(g_mutex);
@@ -1148,16 +1276,16 @@ void OnPresent(IDXGISwapChain* swapChain)
 
         int chosen = -1;
 
-        for (int i = 0; i < g_slotsUsed; ++i)
-            if (chosen < 0 || g_slots[i].vertices > g_slots[chosen].vertices)
+        for (int i = 0; i < g_copies.Used(); ++i)
+            if (g_copies.Current(i) && (chosen < 0 || g_slots[i].vertices > g_slots[chosen].vertices))
                 chosen = i;
 
         // The slots were taken with the direction the pick had then; it changes only between frames, so a frame whose
         // slots disagree straddled that change and is left without depth rather than read the wrong way.
         bool sameDirection = true;
 
-        for (int i = 0; i < g_slotsUsed; ++i)
-            sameDirection = sameDirection && g_slots[i].reversed == g_slots[0].reversed;
+        for (int i = 0; i < g_copies.Used(); ++i)
+            sameDirection &= !g_copies.Current(i) || g_slots[i].reversed == g_slots[chosen].reversed;
 
         if (!sameDirection)
             SayOnce("direction",
@@ -1173,9 +1301,9 @@ void OnPresent(IDXGISwapChain* swapChain)
             g_best.reversed = g_slots[chosen].reversed;
             g_best.frame = presents;
 
-            for (int i = 0; i < g_slotsUsed && i < GenericDepthDx12::Snapshot::kMaxCopies; ++i)
+            for (int i = 0; i < g_copies.Used() && i < GenericDepthDx12::Snapshot::kMaxCopies; ++i)
             {
-                if (g_slots[i].resource != nullptr)
+                if (g_copies.Current(i) && g_slots[i].resource != nullptr)
                 {
                     g_bestSlots[g_best.copyCount] = i;
                     g_best.copies[g_best.copyCount++] = g_slots[i].resource;
@@ -1183,8 +1311,19 @@ void OnPresent(IDXGISwapChain* swapChain)
             }
         }
 
-        g_slotsUsed = 0;
-        g_core.SetSnapshotsWanted(g_overlayOn.load() || Config::Instance()->DlssNrNativeMotion.value_or_default());
+        if (++g_copyCounts.frames == 600)
+        {
+            LOG_INFO("Depth finder: copies per frame {:.2f}, {:.2f} of a buffer already copied in the same list this "
+                     "frame ({} of {} copies in {} frames)",
+                     double(g_copyCounts.copies) / g_copyCounts.frames,
+                     double(g_copyCounts.repeated) / g_copyCounts.frames, g_copyCounts.repeated, g_copyCounts.copies,
+                     g_copyCounts.frames);
+            g_copyCounts = {};
+        }
+        g_copies.NewFrame(presents + 1);
+        g_core.SetSnapshotsWanted(native::roles::DepthSnapshotsWanted(
+            g_overlayOn.load(), Config::Instance()->DlssNrNativeMotion.value_or_default(),
+            Config::Instance()->ReplaceGameFsr1.value_or_default()));
     }
 
     // Part two in the core: counts the present, stands down or wakes, and picks once the warm-up is over.
@@ -1252,6 +1391,73 @@ Snapshot ResolvedSnapshot(ID3D12CommandQueue* queue)
                                     g_backup.samples.Count, g_best.reversed ? "reversed-Z" : "standard Z"));
     g_resolvedFrame = g_best.frame;
     return g_best;
+}
+
+CopyNow CopyThisFrame(ID3D12GraphicsCommandList* list)
+{
+    CopyNow now;
+    auto miss = [&](const char* why)
+    {
+        now.why = why;
+        return now;
+    };
+    if (list == nullptr)
+        return miss("no command list");
+    if (!g_installed || !g_core.Armed())
+        return miss(g_installed ? "the depth finder is not armed (warming up, or the game calls an upscaler)"
+                                : "the depth finder is not installed");
+    // The present-time MSAA resolve can hold g_mutex over a fence wait; stay off it entirely in that mode.
+    if (!g_copies.HandsOut())
+        return miss("resolve pending");
+    const auto pick = g_core.CurrentPick();
+    if (!pick.valid)
+        return miss("no depth buffer is picked");
+    ID3D12Device* device = nullptr;
+    if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return miss("the command list gave no device");
+    device->Release(); // The list keeps its device alive while its identity is compared.
+    std::unique_lock lock(g_mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return miss("busy");
+    if (!g_copies.HandsOut())
+        return miss("resolve pending");
+    if (g_backup.device != device)
+        return miss("the command list is of another device than the copies");
+    ResolvePending(list);
+    const auto found = g_copies.Find((uint64_t) (size_t) list, pick.id);
+    now.copiesInList = found.copiesInList;
+    if (!found.valid)
+        return miss(found.why);
+    const SnapshotSlot& slot = g_slots[found.slot];
+    if (slot.resource == nullptr)
+        return miss("the copy's slot has no texture");
+    now.valid = true;
+    now.resource = slot.resource;
+    now.viewFormat = g_backup.view;
+    now.state = kSlotRest;
+    now.width = g_backup.width;
+    now.height = g_backup.height;
+    now.reversed = found.entry.reversed;
+    now.frame = found.entry.frame;
+    now.ordinal = found.entry.ordinal;
+    now.vertices = found.entry.vertices;
+    now.pick = found.entry.pick;
+    now.acrossPresent = found.acrossPresent;
+    if (!g_saidHandedOut)
+    {
+        g_saidHandedOut = true;
+        LOG_INFO("Depth finder: first copy of this frame handed out in its own list: {}x{}, view format {}, {} of the "
+                 "list's {} copies, {}",
+                 now.width, now.height, (int) now.viewFormat, now.ordinal + 1, now.copiesInList,
+                 g_backup.samples.Count > 1 ? "resolved in the list" : "single-sample");
+    }
+    if (now.acrossPresent && !g_saidAcrossPresent)
+    {
+        g_saidAcrossPresent = true;
+        LOG_INFO("Depth finder: a copy taken before a present handed out in its list, still open (frame {}, now {})",
+                 now.frame, g_copies.Ledger().Frame());
+    }
+    return now;
 }
 
 void RecordPreviewCopy(ID3D12GraphicsCommandList* list)
