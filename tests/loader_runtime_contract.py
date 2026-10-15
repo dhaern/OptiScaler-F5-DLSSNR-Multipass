@@ -1,7 +1,9 @@
 """Real DLL lifetime + actual D3D12 proxy/installer bodies, strict MSVC host contract.
 
 The fixture exports SDK-shaped functions, not a graphics provider. Real Windows
-reference accounting and real Detours run in the executable. No game is touched.
+reference accounting is exercised in both executable phases. Deterministic
+transaction stand-ins test stage failures; a separate phase links real Detours,
+patches fixture exports and calls their actual trampolines. No game is touched.
 """
 from pathlib import Path
 import subprocess
@@ -127,6 +129,79 @@ int wmain(int argc, wchar_t** argv) {
 }
 '''
 
+REAL_MAIN = r'''
+static unsigned realCreate = 0, realSerialize = 0, realVersioned = 0;
+static HRESULT WINAPI RealCreate(IUnknown* adapter, D3D_FEATURE_LEVEL level, REFIID iid, void** out)
+{
+    ++realCreate;
+    return o_D3D12CreateDevice(adapter, level, iid, out);
+}
+static HRESULT WINAPI RealSerialize(const D3D12_ROOT_SIGNATURE_DESC* desc, D3D_ROOT_SIGNATURE_VERSION version,
+                                   ID3DBlob** blob, ID3DBlob** error)
+{
+    ++realSerialize;
+    return o_D3D12SerializeRootSignature(desc, version, blob, error);
+}
+static HRESULT WINAPI RealVersioned(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc,
+                                   ID3DBlob** blob, ID3DBlob** error)
+{
+    ++realVersioned;
+    return o_D3D12SerializeVersionedRootSignature(desc, blob, error);
+}
+int wmain(int argc, wchar_t** argv)
+{
+    if (argc != 2) return 2;
+    hkD3D12CreateDevice = reinterpret_cast<PVOID>(RealCreate);
+    hkD3D12SerializeRootSignature = reinterpret_cast<PVOID>(RealSerialize);
+    hkD3D12SerializeVersionedRootSignature = reinterpret_cast<PVOID>(RealVersioned);
+    // An already-open real transaction makes the installer's Begin fail without
+    // replacing any Detours API. Original caller ownership and retry must survive.
+    CHECK(DetourTransactionBegin() == NO_ERROR);
+    const auto first = KernelHooks::hk_K32_LoadLibraryW(argv[1]);
+    CHECK(first && D3d12Proxy::Module() == first);
+    CHECK(o_D3D12CreateDevice == nullptr && o_D3D12SerializeRootSignature == nullptr &&
+          o_D3D12SerializeVersionedRootSignature == nullptr && retryMarks == 1);
+    CHECK(DetourTransactionAbort() == NO_ERROR);
+    const auto second = KernelHooks::hk_K32_LoadLibraryW(argv[1]);
+    CHECK(second == first && o_D3D12CreateDevice && o_D3D12SerializeRootSignature &&
+          o_D3D12SerializeVersionedRootSignature);
+    if (failures) return 1;
+    const auto create = reinterpret_cast<D3d12Proxy::PFN_D3D12CreateDevice>(GetProcAddress(first, "D3D12CreateDevice"));
+    const auto serialize = reinterpret_cast<D3d12Proxy::PFN_D3D12SerializeRootSignature>(GetProcAddress(first, "D3D12SerializeRootSignature"));
+    const auto versioned = reinterpret_cast<D3d12Proxy::PFN_D3D12SerializeVersionedRootSignature>(GetProcAddress(first, "D3D12SerializeVersionedRootSignature"));
+    CHECK(create && serialize && versioned);
+    if (failures) return 1;
+    // Call immediately after the ordinary loader wrapper returns: all three real
+    // export detours and their original trampoline slots must already work.
+    CHECK(create(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(IUnknown), nullptr) == E_NOTIMPL);
+    CHECK(serialize(nullptr, D3D_ROOT_SIGNATURE_VERSION_1_0, nullptr, nullptr) == E_NOTIMPL);
+    CHECK(versioned(nullptr, nullptr, nullptr) == E_NOTIMPL);
+    CHECK(realCreate == 1 && realSerialize == 1 && realVersioned == 1);
+    for (unsigned i = 0; i != 100; ++i)
+        CHECK(LibraryLoadHooks::ObserveOrdinaryModule(first) == LibraryLoadHooks::RecoveryResult::Ready);
+    CHECK(FreeLibrary(first) && FreeLibrary(second));
+    HMODULE retained = nullptr;
+    CHECK(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                            reinterpret_cast<LPCWSTR>(first), &retained) && retained == first);
+    CHECK(create(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(IUnknown), nullptr) == E_NOTIMPL && realCreate == 2);
+    // Fixture teardown only: remove every real patch before releasing precisely
+    // the proxy's one hidden reference. No proxy call is made after this release.
+    CHECK(DetourTransactionBegin() == NO_ERROR);
+    CHECK(DetourUpdateThread(GetCurrentThread()) == NO_ERROR);
+    CHECK(DetourDetach(reinterpret_cast<PVOID*>(&o_D3D12CreateDevice), hkD3D12CreateDevice) == NO_ERROR);
+    CHECK(DetourDetach(reinterpret_cast<PVOID*>(&o_D3D12SerializeRootSignature), hkD3D12SerializeRootSignature) == NO_ERROR);
+    CHECK(DetourDetach(reinterpret_cast<PVOID*>(&o_D3D12SerializeVersionedRootSignature), hkD3D12SerializeVersionedRootSignature) == NO_ERROR);
+    CHECK(DetourTransactionCommit() == NO_ERROR);
+    if (failures) return 1;
+    CHECK(FreeLibrary(retained));
+    retained = nullptr;
+    CHECK(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                             reinterpret_cast<LPCWSTR>(first), &retained));
+    if (!failures) printf("runtime_real_detours: begin failure/retry, before-return exports, real trampolines, caller release, one retained reference and detach/unload passed\n");
+    return failures ? 1 : 0;
+}
+'''
+
 def main():
     out = Path(sys.argv[1]).resolve(); out.mkdir(parents=True, exist_ok=True)
     revision = sys.argv[2] if len(sys.argv) > 2 else None
@@ -163,8 +238,13 @@ struct D3D12Hooks { inline static std::mutex hookMutex; static bool Hook(); };
     cpp = out/'runtime.generated.cpp'; cpp.write_text(PRE+'\n'+proxy+'\n'+declarations+'\n'+hook+'\n'+'\n'.join(observation)+'\n'+MAIN, encoding='utf-8')
     fixture=out/'runtime_fixture.cpp'; fixture.write_text(FIXTURE,encoding='utf-8')
     dll=out/'d3d12.dll'; exe=out/'runtime.exe'
-    commands=[['cl','/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/LD',str(fixture),f'/Fe:{dll}',f'/Fo:{out / "fixture.obj"}','/link',f'/IMPLIB:{out / "fixture.lib"}'],
-              ['cl','/nologo','/std:c++20','/EHsc','/W4','/WX','/O2',f'/I{ROOT / "OptiScaler/misc"}',str(cpp),f'/Fe:{exe}',f'/Fo:{out / "runtime.obj"}'],[str(exe),str(dll)]]
+    real_cpp = out/'runtime.real.generated.cpp'; real_exe = out/'runtime-real.exe'
+    real_pre = PRE[:PRE.index('// Deterministic transaction stand-ins:')] + '#include <detours/detours.h>\n'
+    real_cpp.write_text(real_pre+'\n'+proxy+'\n'+declarations+'\n'+hook+'\n'+'\n'.join(observation)+'\n'+REAL_MAIN, encoding='utf-8')
+    commands=[['cl','/nologo','/std:c++20','/EHsc','/W4','/WX','/O2','/LD',str(fixture),f'/Fe:{dll}',f'/Fo:{out / "fixture.obj"}','/link','/OPT:NOICF',f'/IMPLIB:{out / "fixture.lib"}'],
+              ['cl','/nologo','/std:c++20','/EHsc','/W4','/WX','/O2',f'/I{ROOT / "OptiScaler/misc"}',str(cpp),f'/Fe:{exe}',f'/Fo:{out / "runtime.obj"}'],[str(exe),str(dll)],
+              ['cl','/nologo','/std:c++20','/EHsc','/W4','/WX','/O2',f'/I{ROOT / "OptiScaler/misc"}',f'/I{ROOT / "OptiScaler/include"}',str(real_cpp),f'/Fe:{real_exe}',f'/Fo:{out / "runtime-real.obj"}',str(ROOT/'OptiScaler/library/detours/detours.lib')],
+              [str(real_exe),str(dll)]]
     logs=[]
     for command in commands:
         p=subprocess.run(command,capture_output=True,text=True,timeout=90)
