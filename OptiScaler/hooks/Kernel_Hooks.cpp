@@ -52,7 +52,7 @@ static inline bool IsInsideWindowsDirectory(const std::string& path)
     return false;
 }
 
-static inline HMODULE CheckLoad(const std::wstring& name)
+static inline HMODULE CheckLoad(const std::wstring& name, bool* ownLoadFailed)
 {
     do
     {
@@ -71,7 +71,7 @@ static inline HMODULE CheckLoad(const std::wstring& name)
             }
         }
 
-        auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), name.data());
+        auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), name.data(), ownLoadFailed);
 
         // skip loading of dll
         if (moduleHandle == (HMODULE) 1337)
@@ -496,12 +496,19 @@ HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
     // LOG_TRACE("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
 
-    auto result = CheckLoad(name);
+    bool ownLoadFailed = false;
+    auto result = CheckLoad(name, &ownLoadFailed);
 
     if (result != nullptr)
         return result;
 
-    return o_K32_LoadLibraryW(lpLibFileName);
+    result = o_K32_LoadLibraryW(lpLibFileName);
+
+    // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+    if (ownLoadFailed && result != nullptr)
+        LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
+
+    return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryA, Kernel32Proxy::PFN_LoadLibraryA)
@@ -526,12 +533,19 @@ HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
     // LOG_TRACE("{}, caller: {}", nameA.data(), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
 
-    auto result = CheckLoad(name);
+    bool ownLoadFailed = false;
+    auto result = CheckLoad(name, &ownLoadFailed);
 
     if (result != nullptr)
         return result;
 
-    return o_K32_LoadLibraryA(lpLibFileName);
+    result = o_K32_LoadLibraryA(lpLibFileName);
+
+    // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+    if (ownLoadFailed && result != nullptr)
+        LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
+
+    return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryExW, Kernel32Proxy::PFN_LoadLibraryExW)
@@ -555,12 +569,19 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, 
     // LOG_TRACE("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
 
-    auto result = CheckLoad(name);
+    bool ownLoadFailed = false;
+    auto result = CheckLoad(name, &ownLoadFailed);
 
     if (result != nullptr)
         return result;
 
-    return o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    result = o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+
+    // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+    if (ownLoadFailed && result != nullptr)
+        LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
+
+    return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryExA, Kernel32Proxy::PFN_LoadLibraryExA)
@@ -585,12 +606,19 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, D
     // LOG_TRACE("{}, caller: {}", nameA.data(), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
 
-    auto result = CheckLoad(name);
+    bool ownLoadFailed = false;
+    auto result = CheckLoad(name, &ownLoadFailed);
 
     if (result != nullptr)
         return result;
 
-    return o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    result = o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+
+    // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+    if (ownLoadFailed && result != nullptr)
+        LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
+
+    return result;
 }
 
 VALIDATE_HOOK(hk_KB_LoadLibraryExW, KernelBaseProxy::PFN_LoadLibraryExW)
@@ -614,12 +642,19 @@ HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, D
     // LOG_TRACE("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
 
-    auto result = CheckLoad(name);
+    bool ownLoadFailed = false;
+    auto result = CheckLoad(name, &ownLoadFailed);
 
     if (result != nullptr)
         return result;
 
-    return o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    result = o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+
+    // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+    if (ownLoadFailed && result != nullptr)
+        LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
+
+    return result;
 }
 
 VALIDATE_HOOK(hk_K32_FreeLibrary, Kernel32Proxy::PFN_FreeLibrary)

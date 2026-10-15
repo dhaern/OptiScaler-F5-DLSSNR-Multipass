@@ -45,17 +45,31 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckA(std::string libName, LPCSTR lpLibFul
     return LoadLibraryCheckW(string_to_wstring(libName), string_to_wstring(fullPath).c_str());
 }
 
-HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath)
+HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath, bool* ownLoadFailed)
 {
-    return HandleLibraryLoad(std::move(libName), lpLibFullPath, nullptr);
+    return HandleLibraryLoad(std::move(libName), lpLibFullPath, nullptr, ownLoadFailed);
 }
 
-HMODULE LibraryLoadHooks::HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE loadedModule)
+HMODULE LibraryLoadHooks::HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE loadedModule,
+                                            bool* ownLoadFailed)
 {
     // A catch-up can initialize and hook an existing image, but cannot replace handles already given to the caller.
     const bool alreadyLoaded = loadedModule != nullptr;
-    const auto load = [loadedModule](LPCWSTR path, HANDLE file, DWORD flags)
-    { return loadedModule != nullptr ? loadedModule : NtdllProxy::LoadLibraryExW_Ldr(path, file, flags); };
+
+    // This load doesn't always resolve to the file the caller's own load gets: an older same-named runtime next to
+    // the exe can be found first and fail to load. A failed load is reported back, so the caller's original load
+    // runs and this is called again with the module it returned.
+    const auto load = [loadedModule, ownLoadFailed](LPCWSTR path, HANDLE file, DWORD flags)
+    {
+        if (loadedModule != nullptr)
+            return loadedModule;
+
+        const HMODULE module = NtdllProxy::LoadLibraryExW_Ldr(path, file, flags);
+        if (module == nullptr && ownLoadFailed != nullptr)
+            *ownLoadFailed = true;
+
+        return module;
+    };
 
     if (!alreadyLoaded)
     {

@@ -89,9 +89,11 @@ class NtdllHooks
             }
         }
 
+        bool ownLoadFailed = false;
+
         // if (originalModule != Util::GetCallerModule(_ReturnAddress()))
         {
-            auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), name.data());
+            auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), name.data(), &ownLoadFailed);
 
             // skip loading of dll
             if (moduleHandle == (HMODULE) 1337)
@@ -107,7 +109,16 @@ class NtdllHooks
             }
         }
 
-        return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const NTSTATUS status = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+
+        // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+        if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
+        {
+            const std::wstring fullName(name);
+            LibraryLoadHooks::HandleCallerModule(fullName, fullName.c_str(), (HMODULE) *ModuleHandle);
+        }
+
+        return status;
     }
 
     static NTSTATUS NTAPI hkNtLoadDll(PUNICODE_STRING PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
@@ -159,10 +170,12 @@ class NtdllHooks
             }
         }
 
+        bool ownLoadFailed = false;
+
         // Do not interfere with original modules calls
         if (originalModule != Util::GetCallerModule(_ReturnAddress()))
         {
-            auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), path.data());
+            auto moduleHandle = LibraryLoadHooks::LoadLibraryCheckW(name.data(), path.data(), &ownLoadFailed);
 
             // skip loading of dll
             if (moduleHandle == (HMODULE) 1337)
@@ -178,7 +191,16 @@ class NtdllHooks
             }
         }
 
-        return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const NTSTATUS status = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+
+        // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
+        if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
+        {
+            const std::wstring fullPath(path);
+            LibraryLoadHooks::HandleCallerModule(std::wstring(name), fullPath.c_str(), (HMODULE) *ModuleHandle);
+        }
+
+        return status;
     }
 
     static NTSTATUS NTAPI hkLdrUnloadDll(PVOID lpLibrary)
