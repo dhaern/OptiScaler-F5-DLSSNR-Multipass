@@ -39,53 +39,76 @@ struct d3d12_dll
 
 HRESULT _D3D12CreateDeviceExport(IUnknown* adapter, D3D_FEATURE_LEVEL minLevel, REFIID riid, void** ppDevice)
 {
-    return D3d12Proxy::D3D12CreateDevice_Hooked()(adapter, minLevel, riid, ppDevice);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12CreateDevice_Hooked();
+    return method ? method(adapter, minLevel, riid, ppDevice) : E_FAIL;
 }
 
 HRESULT _D3D12SerializeRootSignatureExport(D3D12_ROOT_SIGNATURE_DESC* pRootSignature,
                                            D3D_ROOT_SIGNATURE_VERSION Version, ID3DBlob** ppBlob,
                                            ID3DBlob** ppErrorBlob)
 {
-    return D3d12Proxy::D3D12SerializeRootSignature_Hooked()(pRootSignature, Version, ppBlob, ppErrorBlob);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12SerializeRootSignature_Hooked();
+    return method ? method(pRootSignature, Version, ppBlob, ppErrorBlob) : E_FAIL;
 }
 
 HRESULT _D3D12CreateRootSignatureDeserializerExport(LPCVOID pSrcData, SIZE_T SrcDataSizeInBytes,
                                                     REFIID pRootSignatureDeserializerInterface,
                                                     void** ppRootSignatureDeserializer)
 {
-    return D3d12Proxy::D3D12CreateRootSignatureDeserializer_Hooked()(
-        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12CreateRootSignatureDeserializer_Hooked();
+    return method ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
+                  : E_FAIL;
 }
 
 HRESULT _D3D12SerializeVersionedRootSignatureExport(D3D12_VERSIONED_ROOT_SIGNATURE_DESC* pRootSignature,
                                                     ID3DBlob** ppBlob, ID3DBlob** ppErrorBlob)
 {
-    return D3d12Proxy::D3D12SerializeVersionedRootSignature_Hooked()(pRootSignature, ppBlob, ppErrorBlob);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12SerializeVersionedRootSignature_Hooked();
+    return method ? method(pRootSignature, ppBlob, ppErrorBlob) : E_FAIL;
 }
 
 HRESULT _D3D12CreateVersionedRootSignatureDeserializerExport(LPCVOID pSrcData, SIZE_T SrcDataSizeInBytes,
                                                              REFIID pRootSignatureDeserializerInterface,
                                                              void** ppRootSignatureDeserializer)
 {
-    return D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_Hooked()(
-        pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_Hooked();
+    return method ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
+                  : E_FAIL;
 }
 
 HRESULT _D3D12GetDebugInterfaceExport(REFIID riid, void** ppDebug)
 {
-    return D3d12Proxy::D3D12GetDebugInterface_Hooked()(riid, ppDebug);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12GetDebugInterface_Hooked();
+    return method ? method(riid, ppDebug) : E_FAIL;
 }
 
 HRESULT _D3D12EnableExperimentalFeaturesExport(UINT NumFeatures, const IID* pIIDs, void* pConfigurationStructs,
                                                UINT* pConfigurationStructSizes)
 {
-    return D3d12Proxy::D3D12EnableExperimentalFeatures_Hooked()(NumFeatures, pIIDs, pConfigurationStructs,
-                                                                pConfigurationStructSizes);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12EnableExperimentalFeatures_Hooked();
+    return method ? method(NumFeatures, pIIDs, pConfigurationStructs, pConfigurationStructSizes) : E_FAIL;
 }
 
 HRESULT _D3D12GetInterfaceExport(REFCLSID clsid, REFIID riid, void** ppInterface)
 {
-    return D3d12Proxy::D3D12GetInterface_Hooked()(clsid, riid, ppInterface);
+    if (D3d12Proxy::Module() == nullptr)
+        D3d12Proxy::Init();
+    const auto method = D3d12Proxy::D3D12GetInterface_Hooked();
+    return method ? method(clsid, riid, ppInterface) : E_FAIL;
 }
 
 void _GetBehaviorValue() { d3d12.GetBehaviorValue(); }

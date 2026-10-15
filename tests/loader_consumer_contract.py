@@ -22,6 +22,12 @@ def main():
     pre = pre.replace('#include "D3d12Binding.h"', source('OptiScaler/misc/D3d12Binding.h').replace('#pragma once', ''))
     proxy = source('OptiScaler/proxies/D3D12_Proxy.h')
     proxy = proxy[proxy.index('class D3d12Proxy'):]
+    exports = source('OptiScaler/exports/d3d12.h')
+    exports = '\n'.join(function_body(exports, 'HRESULT ' + name + '(') for name in (
+        '_D3D12CreateDeviceExport', '_D3D12SerializeRootSignatureExport',
+        '_D3D12CreateRootSignatureDeserializerExport', '_D3D12SerializeVersionedRootSignatureExport',
+        '_D3D12CreateVersionedRootSignatureDeserializerExport', '_D3D12GetDebugInterfaceExport',
+        '_D3D12EnableExperimentalFeaturesExport', '_D3D12GetInterfaceExport'))
     identify = source('OptiScaler/misc/IdentifyGpu.cpp')
     adapter = function_body(identify, 'void IdentifyGpu::getHardwareAdapter(')
     capability = function_body(identify, 'void IdentifyGpu::updateD3d12Capabilities(')
@@ -48,6 +54,21 @@ struct IdentifyGpu {
 '''
     main_cpp = r'''
 static bool faulted = false;
+static HRESULT InvokeExport(unsigned api) {
+    __try {
+        switch (api) {
+        case 0: return _D3D12CreateDeviceExport(nullptr,D3D_FEATURE_LEVEL_11_0,__uuidof(IUnknown),nullptr);
+        case 1: return _D3D12SerializeRootSignatureExport(nullptr,D3D_ROOT_SIGNATURE_VERSION_1_0,nullptr,nullptr);
+        case 2: return _D3D12CreateRootSignatureDeserializerExport(nullptr,0,__uuidof(IUnknown),nullptr);
+        case 3: return _D3D12SerializeVersionedRootSignatureExport(nullptr,nullptr,nullptr);
+        case 4: return _D3D12CreateVersionedRootSignatureDeserializerExport(nullptr,0,__uuidof(IUnknown),nullptr);
+        case 5: return _D3D12GetDebugInterfaceExport(__uuidof(IUnknown),nullptr);
+        case 6: return _D3D12EnableExperimentalFeaturesExport(0,nullptr,nullptr,nullptr);
+        default: return _D3D12GetInterfaceExport(__uuidof(IUnknown),__uuidof(IUnknown),nullptr);
+        }
+    }
+    __except(GetExceptionCode()==EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { faulted=true; return E_UNEXPECTED; }
+}
 static void Invoke(IDXGIFactory* f, IDXGIAdapter** a) {
     __try { IdentifyGpu::getHardwareAdapter(f,a,D3D_FEATURE_LEVEL_11_0); }
     __except(GetExceptionCode()==EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { faulted=true; }
@@ -63,9 +84,12 @@ int main() {
         CHECK(!faulted && !a);
         CHECK(!IdentifyGpu::hasD3d12Capabilities && !IdentifyGpu::capabilityWork);
         CHECK(!D3d12Proxy::Module());
+        for (unsigned api=0;api!=8;++api) CHECK(InvokeExport(api)==E_FAIL);
+        CHECK(!faulted && !D3d12Proxy::Module());
     }
     if (a) { a->Release(); a=nullptr; }
     Invoke(f,&a); CHECK(!faulted && a && D3d12Proxy::D3D12CreateDevice_());
+    CHECK(SUCCEEDED(_D3D12CreateDeviceExport(a,D3D_FEATURE_LEVEL_11_0,__uuidof(ID3D12Device),nullptr)));
     IdentifyGpu::updateD3d12Capabilities();
     CHECK(IdentifyGpu::hasD3d12Capabilities && IdentifyGpu::capabilityWork==1);
     IdentifyGpu::updateD3d12Capabilities(); CHECK(IdentifyGpu::capabilityWork==1);
@@ -75,7 +99,7 @@ int main() {
 }
 '''
     cpp = out / 'consumer.cpp'
-    cpp.write_text(pre + proxy + extra + adapter + '\n' + capability + main_cpp)
+    cpp.write_text(pre + proxy + exports + extra + adapter + '\n' + capability + main_cpp)
     # Frozen consumer's unused EnumAdapterByLuid result is an inherited warning;
     # allow that warning ONLY on the frozen behavioral-red compile.
     flags = ['/W4', '/WX'] if not revision else ['/W4', '/WX-']
