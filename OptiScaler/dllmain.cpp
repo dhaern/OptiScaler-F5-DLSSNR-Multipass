@@ -2246,9 +2246,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
     case DLL_PROCESS_DETACH:
         // ExitProcess from a thread without a static-TLS array (misc/ThreadTls.h; hk_K32_ExitProcess forwards those
-        // untouched) runs this detach on that thread. Nothing below runs on process exit anyway, but the CRT runs our
-        // static destructors right after this on the same thread, and they check the shutdown flag to skip their GPU
-        // cleanup. State::Existing() reaches it without thread-local storage; there is no State to flag if it is null.
+        // untouched) runs this detach on that thread. Nothing below runs on process exit anyway. The CRT runs our
+        // static destructors right after this on the same thread; the flag is set for any code that checks it during
+        // shutdown. State::Existing() reaches it without thread-local storage; there is no State to flag if it is null.
         if (lpReserved != nullptr && ThreadHasNoTls())
         {
             if (auto* state = State::Existing())

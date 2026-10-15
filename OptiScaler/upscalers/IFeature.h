@@ -65,6 +65,9 @@ class IFeature
 
     std::unordered_set<std::pair<float, float>, hashFunction> _jitterInfo;
 
+    // Per feature, so a second context or a rebuild still gets its own warnings
+    uint32_t _noSubrectWarnings = 0;
+
   protected:
     // D3D11with12
     inline static ID3D12Device* _dx11on12Device = nullptr;

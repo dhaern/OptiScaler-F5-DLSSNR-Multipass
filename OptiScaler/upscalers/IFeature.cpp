@@ -181,11 +181,12 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
             NVSDK_NGX_Result_Success)
     {
         // Every evaluate of a caller that never sets a subrect (OptiScaler's own virtual upscaler, many games) lands
-        // here: warn a few times, not once per frame (thousands of identical [W] lines per run otherwise).
-        static std::atomic<uint32_t> noSubrectWarnings { 0 };
-        if (noSubrectWarnings.load(std::memory_order_relaxed) < 8 &&
-            noSubrectWarnings.fetch_add(1, std::memory_order_relaxed) < 8)
+        // here: warn a few times per feature, not once per frame (thousands of identical [W] lines per run otherwise).
+        if (_noSubrectWarnings < 8)
+        {
+            _noSubrectWarnings++;
             LOG_WARN("No subrect dimension info!");
+        }
 
         unsigned int width;
         unsigned int height;

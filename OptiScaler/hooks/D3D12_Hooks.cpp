@@ -2085,7 +2085,7 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
 {
     auto* config = Config::Instance();
     const bool extendedStateRestore = config->ExtendedStateRestore.value_or_default();
-    const bool samplerOverride = config->MipmapBiasOverride.has_value() || config->AnisotropyOverride.has_value();
+    bool samplerOverride = config->MipmapBiasOverride.has_value() || config->AnisotropyOverride.has_value();
     const bool trackRootParameterCount = extendedStateRestore || samplerOverride;
     const bool trackHudfixRootSignature = config->FGHudfixPersistentBindings.value_or_default() &&
                                           State::Instance().activeFgInput == FGInput::Upscaler &&
@@ -2105,15 +2105,30 @@ static HRESULT hkCreateRootSignature(ID3D12Device* device, UINT nodeMask, const 
                                         ? o_D3D12SerializeVersionedRootSignature
                                         : D3d12Proxy::D3D12SerializeVersionedRootSignature_();
 
-    if (createDeserializer == nullptr || (samplerOverride && serializeVersioned == nullptr))
+    if (createDeserializer == nullptr)
     {
         static std::atomic<bool> warned { false };
         if (!warned.exchange(true))
-            LOG_ERROR("D3D12 root signature functions unavailable, passing root signatures through unchanged: no "
+            LOG_ERROR("D3D12 root signature deserializer unavailable, passing root signatures through unchanged: no "
                       "mipmap bias/anisotropy override, ExtendedStateRestore or persistent HUDFix bindings");
 
         return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
                                      ppvRootSignature);
+    }
+
+    // Without a serializer only the sampler override is lost; the tracking below still works
+    if (samplerOverride && serializeVersioned == nullptr)
+    {
+        static std::atomic<bool> warned { false };
+        if (!warned.exchange(true))
+            LOG_ERROR("D3D12SerializeVersionedRootSignature unavailable: no mipmap bias/anisotropy override on root "
+                      "signature static samplers");
+
+        samplerOverride = false;
+
+        if (!extendedStateRestore && !trackHudfixRootSignature)
+            return o_CreateRootSignature(device, nodeMask, pBlobWithRootSignature, blobLengthInBytes, riid,
+                                         ppvRootSignature);
     }
 
     ID3D12VersionedRootSignatureDeserializer* deserializer = nullptr;

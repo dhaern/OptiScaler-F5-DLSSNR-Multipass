@@ -639,7 +639,7 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     return nullptr;
 }
 
-// Same list as FreeLibrary below, keep them in sync
+// The modules OptiScaler keeps loaded. Plain globals only, so threads without TLS can call it
 bool LibraryLoadHooks::IsKeptLoaded(PVOID library)
 {
     if (library == nullptr)
@@ -653,97 +653,14 @@ bool LibraryLoadHooks::IsKeptLoaded(PVOID library)
 
 std::optional<NTSTATUS> LibraryLoadHooks::FreeLibrary(PVOID lpLibrary)
 {
-    std::optional<NTSTATUS> result;
+    if (!IsKeptLoaded(lpLibrary))
+        return std::nullopt;
 
-    if (lpLibrary == dllModule)
-    {
 #ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for OptiScaler, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
+    LOG_WARN("Keeping {:X} loaded, caller: {}", (size_t) lpLibrary, Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == FfxApiProxy::Dx12Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for FFX Dx12, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == FfxApiProxy::VkModule())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for FFX Vulkan, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == XeSSProxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for XeSS, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == DxgiProxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for DXGI, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == D3d12Proxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for D3D12, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == Kernel32Proxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for Kernel32, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == KernelBaseProxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for KernelBase, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == NtdllProxy::Module())
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for ntdll, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == vulkanModule)
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for Vulkan, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    else if (lpLibrary == d3d11Module)
-    {
-#ifdef LOG_LIB_OPERATIONS
-        LOG_WARN("Call for D3D11, caller: {}", Util::WhoIsTheCaller(_ReturnAddress()));
-#endif
-        State::Instance().modulesToFree.insert(lpLibrary);
-        result = TRUE;
-    }
-    return result;
+    State::Instance().modulesToFree.insert(lpLibrary);
+    return TRUE;
 }
 
 HMODULE LibraryLoadHooks::LoadNvApi()

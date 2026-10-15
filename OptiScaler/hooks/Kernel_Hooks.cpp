@@ -91,7 +91,19 @@ VALIDATE_HOOK(hk_K32_GetProcAddress, Kernel32Proxy::PFN_GetProcAddress)
 FARPROC WINAPI KernelHooks::hk_K32_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 {
     if (ThreadHasNoTls())
+    {
+        // The fake amdxc64 handle can come from a thread that has TLS. It is a constant, so it is still recognised
+        // here. It is only handed out when the GPU supports FSR 4, so that check needs no repeating.
+        if (hModule == amdxc64Mark)
+        {
+            if ((size_t) lpProcName >= 0x000000000000F000 && lstrcmpA(lpProcName, "AmdExtD3DCreateInterface") == 0)
+                return (FARPROC) &Amdxc64Hooks::hkAmdExtD3DCreateInterface;
+
+            return o_K32_GetProcAddress(o_K32_GetModuleHandleW(L"amdxc64.dll"), lpProcName);
+        }
+
         return o_K32_GetProcAddress(hModule, lpProcName);
+    }
 
     if ((size_t) lpProcName < 0x000000000000F000)
     {
