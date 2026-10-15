@@ -53,6 +53,7 @@ void operator delete(void* p, size_t) noexcept { free(p); }
 #define LOG_TRACE(...) ((void)0)
 #define LOG_DEBUG(...) ((void)0)
 static bool noTls = false, skipChecks = false, allocateAfterOriginal = false;
+struct Config { struct Option { bool value_or_default() const { return false; } } UseNtdllHooks; static Config* Instance() { static Config c; return &c; } };
 static bool ThreadHasNoTls() { return noTls; }
 static HMODULE originalModule = reinterpret_cast<HMODULE>(0x20000);
 static int failures = 0;
@@ -258,6 +259,8 @@ def main():
     kernel = source_at("OptiScaler/hooks/Kernel_Hooks.cpp")
     native = source_at("OptiScaler/hooks/Ntdll_Hooks.h")
     parts = [PREAMBLE]
+    if 'static bool NativeLoadOnly(' in kernel:
+        parts += [function_body(kernel, 'template <class C> static bool NativeLoadOnly(')]
     parts += [function_body(kernel, "static inline HMODULE CheckLoad(")]
     parts += [function_body(kernel, f"HMODULE KernelHooks::{name}(") for name in (
         "hk_K32_LoadLibraryW", "hk_K32_LoadLibraryA", "hk_K32_LoadLibraryExW",

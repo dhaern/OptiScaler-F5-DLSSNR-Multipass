@@ -128,19 +128,21 @@ class KernelHooks
         {
             if (o_K32_FreeLibrary == nullptr)
                 o_K32_FreeLibrary = Kernel32Proxy::Hook_FreeLibrary(hk_K32_FreeLibrary);
-
-            if (o_K32_LoadLibraryA == nullptr)
-                o_K32_LoadLibraryA = Kernel32Proxy::Hook_LoadLibraryA(hk_K32_LoadLibraryA);
-
-            if (o_K32_LoadLibraryW == nullptr)
-                o_K32_LoadLibraryW = Kernel32Proxy::Hook_LoadLibraryW(hk_K32_LoadLibraryW);
-
-            if (o_K32_LoadLibraryExA == nullptr)
-                o_K32_LoadLibraryExA = Kernel32Proxy::Hook_LoadLibraryExA(hk_K32_LoadLibraryExA);
-
-            if (o_K32_LoadLibraryExW == nullptr)
-                o_K32_LoadLibraryExW = Kernel32Proxy::Hook_LoadLibraryExW(hk_K32_LoadLibraryExW);
         }
+
+        if (o_K32_LoadLibraryA == nullptr)
+            o_K32_LoadLibraryA = Kernel32Proxy::Hook_LoadLibraryA(hk_K32_LoadLibraryA);
+
+        if (o_K32_LoadLibraryW == nullptr)
+            o_K32_LoadLibraryW = Kernel32Proxy::Hook_LoadLibraryW(hk_K32_LoadLibraryW);
+
+        if (o_K32_LoadLibraryExA == nullptr)
+            o_K32_LoadLibraryExA = Kernel32Proxy::Hook_LoadLibraryExA(hk_K32_LoadLibraryExA);
+
+        // Forwarded exports share one target with KernelBase; do not detour that target twice.
+        if (o_K32_LoadLibraryExW == nullptr &&
+            Kernel32Proxy::LoadLibraryExW_Hooked() != KernelBaseProxy::LoadLibraryExW_Hooked())
+            o_K32_LoadLibraryExW = Kernel32Proxy::Hook_LoadLibraryExW(hk_K32_LoadLibraryExW);
     }
 
     static void HookBase()
@@ -152,10 +154,9 @@ class KernelHooks
         if (o_KB_GetProcAddress == nullptr)
             o_KB_GetProcAddress = KernelBaseProxy::Hook_GetProcAddress(hk_KB_GetProcAddress);
 
-        if (!Config::Instance()->UseNtdllHooks.value_or_default())
-        {
-            if (o_KB_LoadLibraryExW == nullptr)
-                o_KB_LoadLibraryExW = KernelBaseProxy::Hook_LoadLibraryExW(hk_KB_LoadLibraryExW);
-        }
+        // Win32 loads reach this boundary even with native hooks selected. Its native-mode handling is
+        // limited to D3D12 recovery/no-execution classification; other loads still reach the native hooks.
+        if (o_KB_LoadLibraryExW == nullptr)
+            o_KB_LoadLibraryExW = KernelBaseProxy::Hook_LoadLibraryExW(hk_KB_LoadLibraryExW);
     }
 };

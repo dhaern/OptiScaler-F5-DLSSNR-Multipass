@@ -51,6 +51,7 @@ enum class WorkingMode { Other, D3d12 };
 struct State { WorkingMode workingMode = WorkingMode::Other; bool isShuttingDown=false; static bool SkipDllChecks() { return false; } static State& Instance() { static State s; return s; } };
 struct DxgiProxy { static bool InsideFactoryCreation() { return false; } };
 static int retryMarks=0;
+struct Config { struct Option { bool value_or_default() const { return false; } } UseNtdllHooks; static Config* Instance() { static Config c; return &c; } };
 struct KernelHooks { inline static auto o_K32_LoadLibraryW = &LoadLibraryW; static HMODULE hk_K32_LoadLibraryW(LPCWSTR); };
 inline bool ThreadHasNoTls() { return false; }
 inline HMODULE CheckLoad(const std::wstring&, bool* failed) { *failed=true; return nullptr; }
@@ -234,6 +235,8 @@ struct D3D12Hooks { inline static std::mutex hookMutex; static bool Hook(); };
                     'LibraryLoadHooks::RecoveryResult LibraryLoadHooks::HandleCallerModule(']:
             observation.append(function_body(library,sig))
         kernel=source('OptiScaler/hooks/Kernel_Hooks.cpp')
+        if 'static bool NativeLoadOnly(' in kernel:
+            observation.append(function_body(kernel,'template <class C> static bool NativeLoadOnly('))
         observation.append(function_body(kernel,'HMODULE KernelHooks::hk_K32_LoadLibraryW('))
     cpp = out/'runtime.generated.cpp'; cpp.write_text(PRE+'\n'+proxy+'\n'+declarations+'\n'+hook+'\n'+'\n'.join(observation)+'\n'+MAIN, encoding='utf-8')
     fixture=out/'runtime_fixture.cpp'; fixture.write_text(FIXTURE,encoding='utf-8')

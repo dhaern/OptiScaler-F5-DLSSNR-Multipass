@@ -88,6 +88,34 @@ static inline HMODULE CheckLoad(const std::wstring& name, bool* ownLoadFailed)
     return nullptr;
 }
 
+// In native mode these Win32 hooks add only the supported D3D12 recovery boundary and no-init veto.
+// Forward other ordinary loads without suppressing the existing native provider policy.
+template <class C> static bool NativeLoadOnly(const C* path, DWORD flags = 0)
+{
+    if (ThreadHasNoTls() || !Config::Instance()->UseNtdllHooks.value_or_default() ||
+        loader_boundary::NonExecutable(flags))
+        return false;
+    std::basic_string_view<C> name = path ? path : std::basic_string_view<C> {};
+    for (size_t i = name.size(); i != 0; --i)
+        if (name[i - 1] == '/' || name[i - 1] == '\\')
+        {
+            name.remove_prefix(i);
+            break;
+        }
+    constexpr char target[] = "d3d12.dll";
+    if (name.size() != 5 && name.size() != 9)
+        return true;
+    for (size_t i = 0; i < name.size(); ++i)
+    {
+        auto c = name[i];
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<C>(c + ('a' - 'A'));
+        if (c != target[i])
+            return true;
+    }
+    return false;
+}
+
 VALIDATE_HOOK(hk_K32_GetProcAddress, Kernel32Proxy::PFN_GetProcAddress)
 static FARPROC ResolveAmdMarker(LPCSTR name, Kernel32Proxy::PFN_GetProcAddress getProc)
 {
@@ -467,6 +495,11 @@ VALIDATE_HOOK(hk_K32_LoadLibraryW, Kernel32Proxy::PFN_LoadLibraryW)
 HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
 {
     const DWORD entryError = GetLastError();
+    if (NativeLoadOnly(lpLibFileName))
+    {
+        SetLastError(entryError);
+        return o_K32_LoadLibraryW(lpLibFileName);
+    }
     const auto original = [&]()
     {
         loader_boundary::OriginalOnlyScope scope;
@@ -517,6 +550,11 @@ VALIDATE_HOOK(hk_K32_LoadLibraryA, Kernel32Proxy::PFN_LoadLibraryA)
 HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
 {
     const DWORD entryError = GetLastError();
+    if (NativeLoadOnly(lpLibFileName))
+    {
+        SetLastError(entryError);
+        return o_K32_LoadLibraryA(lpLibFileName);
+    }
     const auto original = [&]()
     {
         loader_boundary::OriginalOnlyScope scope;
@@ -573,6 +611,11 @@ VALIDATE_HOOK(hk_K32_LoadLibraryExW, Kernel32Proxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     const DWORD entryError = GetLastError();
+    if (NativeLoadOnly(lpLibFileName, dwFlags))
+    {
+        SetLastError(entryError);
+        return o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    }
     const auto original = [&]()
     {
         loader_boundary::OriginalOnlyScope scope;
@@ -634,6 +677,11 @@ VALIDATE_HOOK(hk_K32_LoadLibraryExA, Kernel32Proxy::PFN_LoadLibraryExA)
 HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     const DWORD entryError = GetLastError();
+    if (NativeLoadOnly(lpLibFileName, dwFlags))
+    {
+        SetLastError(entryError);
+        return o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    }
     const auto original = [&]()
     {
         loader_boundary::OriginalOnlyScope scope;
@@ -701,6 +749,11 @@ VALIDATE_HOOK(hk_KB_LoadLibraryExW, KernelBaseProxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     const DWORD entryError = GetLastError();
+    if (NativeLoadOnly(lpLibFileName, dwFlags))
+    {
+        SetLastError(entryError);
+        return o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    }
     const auto original = [&]()
     {
         loader_boundary::OriginalOnlyScope scope;
