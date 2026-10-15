@@ -208,15 +208,16 @@ void Discard(Gpu& gpu)
                  "list discarded without execution");
 }
 
-void Parity(Gpu& gpu, const Shot& still, const Shot& shifted, const Shot& dark)
+void Parity(Gpu& gpu, const Shot& still, const Shot& shifted, const Shot& dark, bool guideSurface)
 {
     NativeProducer a, b;
     if (!checks.Check(a.Init(gpu.device.Get()) && b.Init(gpu.device.Get()), "parity producers ready"))
         return;
+    a.Trust()->Tuning().guideSurface = b.Trust()->Tuning().guideSurface = guideSurface;
     Consumer ca(gpu, DXGI_FORMAT_R16G16B16A16_FLOAT), cb(gpu);
     NativeProducer::Options options;
     options.apply = options.flowPreview = true;
-    unsigned cutsA = 0, cutsB = 0;
+    unsigned cutsA = 0, cutsB = 0, directFrames = 0, guideFrames = 0;
     bool same = true, outputs = true, resetOnCut = false, maskOnCut = false, directDepth = true;
     const auto colourBefore = Read(gpu, still.colour.Get(), D3D12_RESOURCE_STATE_COMMON);
     for (unsigned i = 0; i < 12; ++i)
@@ -234,8 +235,13 @@ void Parity(Gpu& gpu, const Shot& still, const Shot& shifted, const Shot& dark)
             resetOnCut = rb.nativeRan && cb.last.reset;
         if (!rb.flowValid)
             continue;
-        directDepth = directDepth && cb.last.depth == input.depth[0] && b.Trust()->GuideDepth() == nullptr &&
-                      cb.last.motion->GetDesc().Format == DXGI_FORMAT_R16G16_FLOAT;
+        const bool direct = !guideSurface && input.depthCount == 1;
+        directFrames += direct;
+        guideFrames += !direct;
+        directDepth = directDepth && cb.last.motion->GetDesc().Format == DXGI_FORMAT_R16G16_FLOAT &&
+                      (direct ? cb.last.depth == input.depth[0] && b.Trust()->GuideDepth() == nullptr
+                              : input.depthCount == 0 ? cb.last.depth == nullptr && b.Trust()->GuideDepth() == nullptr
+                                                      : cb.last.depth != nullptr && cb.last.depth == b.Trust()->GuideDepth());
         const std::pair<ID3D12Resource*, ID3D12Resource*> parts[] = { { a.Flow()->Flow(), b.Flow()->Flow() },
                                                                       { a.Trust()->Mask(), b.Trust()->Mask() },
                                                                       { ca.last.depth, cb.last.depth },
@@ -258,8 +264,9 @@ void Parity(Gpu& gpu, const Shot& still, const Shot& shifted, const Shot& dark)
     }
     checks.Check(same && ca.calls == cb.calls, "Run and RecordInList: identical results and consumer calls");
     checks.Check(outputs, "flow, mask, guide xy, preview and consumer copy are bit-identical");
-    checks.Check(directDepth,
-                 "in-list: two-channel motion, the single readable depth copy delivered without GuideDepth");
+    checks.Check(directDepth && guideFrames > 0 && (guideSurface || directFrames > 0),
+                 guideSurface ? "in-list: two-channel motion and surface depth guides (default)"
+                              : "in-list: direct readable depth without GuideDepth; missing depth stays absent");
     checks.Check(cutsA == 1 && cutsB == 1 && resetOnCut && maskOnCut,
                  "scene cut: immediate distrust, one report and consumer reset");
     checks.Check(colourBefore == Read(gpu, still.colour.Get(), D3D12_RESOURCE_STATE_COMMON),
@@ -514,7 +521,10 @@ int main(int argc, char** argv)
         checks.Skip("WARP flow-dependent parity/scene-cut/consumer cases: baseline 8313dd6c Smooth JIT access "
                     "violation; first-frame tickets/timer still tested");
     else
-        Parity(gpu, still, shifted, dark);
+    {
+        Parity(gpu, still, shifted, dark, false);
+        Parity(gpu, still, shifted, dark, true);
+    }
     Tickets(gpu, still, noFlow);
     TimingRing(gpu, still, shifted, smaller, noFlow);
     checks.Check(gpu.WaitIdle() && gpu.Messages() == 0, "debug layer: zero new errors or warnings");
