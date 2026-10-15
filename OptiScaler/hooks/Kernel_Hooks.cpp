@@ -478,6 +478,7 @@ VOID WINAPI KernelHooks::hk_K32_OutputDebugStringA(LPCSTR lpOutputString)
 VALIDATE_HOOK(hk_K32_LoadLibraryW, Kernel32Proxy::PFN_LoadLibraryW)
 HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
 {
+    const DWORD entryError = GetLastError();
     if (ThreadHasNoTls())
     {
         auto module = o_K32_LoadLibraryW(lpLibFileName);
@@ -502,18 +503,22 @@ HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
     if (result != nullptr)
         return result;
 
+    SetLastError(entryError);
     result = o_K32_LoadLibraryW(lpLibFileName);
+    const DWORD originalError = GetLastError();
 
     // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
     if (ownLoadFailed && result != nullptr)
         LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
 
+    SetLastError(originalError);
     return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryA, Kernel32Proxy::PFN_LoadLibraryA)
 HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
 {
+    const DWORD entryError = GetLastError();
     if (ThreadHasNoTls())
     {
         auto module = o_K32_LoadLibraryA(lpLibFileName);
@@ -539,18 +544,22 @@ HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
     if (result != nullptr)
         return result;
 
+    SetLastError(entryError);
     result = o_K32_LoadLibraryA(lpLibFileName);
+    const DWORD originalError = GetLastError();
 
     // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
     if (ownLoadFailed && result != nullptr)
         LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
 
+    SetLastError(originalError);
     return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryExW, Kernel32Proxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
+    const DWORD entryError = GetLastError();
     if (ThreadHasNoTls())
     {
         auto module = o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
@@ -575,18 +584,22 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, 
     if (result != nullptr)
         return result;
 
+    SetLastError(entryError);
     result = o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    const DWORD originalError = GetLastError();
 
     // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
     if (ownLoadFailed && result != nullptr)
         LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
 
+    SetLastError(originalError);
     return result;
 }
 
 VALIDATE_HOOK(hk_K32_LoadLibraryExA, Kernel32Proxy::PFN_LoadLibraryExA)
 HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
+    const DWORD entryError = GetLastError();
     if (ThreadHasNoTls())
     {
         auto module = o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
@@ -612,18 +625,22 @@ HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, D
     if (result != nullptr)
         return result;
 
+    SetLastError(entryError);
     result = o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    const DWORD originalError = GetLastError();
 
     // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
     if (ownLoadFailed && result != nullptr)
         LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
 
+    SetLastError(originalError);
     return result;
 }
 
 VALIDATE_HOOK(hk_KB_LoadLibraryExW, KernelBaseProxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
+    const DWORD entryError = GetLastError();
     if (ThreadHasNoTls())
     {
         auto module = o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
@@ -648,12 +665,15 @@ HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, D
     if (result != nullptr)
         return result;
 
+    SetLastError(entryError);
     result = o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    const DWORD originalError = GetLastError();
 
     // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
     if (ownLoadFailed && result != nullptr)
         LibraryLoadHooks::HandleCallerModule(name, name.c_str(), result);
 
+    SetLastError(originalError);
     return result;
 }
 

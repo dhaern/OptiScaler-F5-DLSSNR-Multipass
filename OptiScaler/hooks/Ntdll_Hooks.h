@@ -49,6 +49,7 @@ class NtdllHooks
     static NTSTATUS NTAPI hkLdrLoadDll(PWSTR PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
                                        PHANDLE ModuleHandle)
     {
+        const DWORD entryError = GetLastError();
         if (ThreadHasNoTls())
         {
             auto result = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
@@ -62,10 +63,11 @@ class NtdllHooks
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
-        if (ModuleFileName == nullptr || ModuleFileName->Length == 0)
+        if (ModuleFileName == nullptr || ModuleFileName->Length == 0 || ModuleFileName->Buffer == nullptr ||
+            ModuleFileName->Length % sizeof(wchar_t) != 0 || ModuleFileName->Length > ModuleFileName->MaximumLength)
             return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
 
-        std::wstring_view name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        const std::wstring name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
 
 #ifdef _DEBUG
         // LOG_DEBUG("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
@@ -109,7 +111,9 @@ class NtdllHooks
             }
         }
 
+        SetLastError(entryError);
         const NTSTATUS status = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const DWORD originalError = GetLastError();
 
         // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
         if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
@@ -118,12 +122,14 @@ class NtdllHooks
             LibraryLoadHooks::HandleCallerModule(fullName, fullName.c_str(), (HMODULE) *ModuleHandle);
         }
 
+        SetLastError(originalError);
         return status;
     }
 
     static NTSTATUS NTAPI hkNtLoadDll(PUNICODE_STRING PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName,
                                       PHANDLE ModuleHandle)
     {
+        const DWORD entryError = GetLastError();
         if (ThreadHasNoTls())
         {
             auto result = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
@@ -137,10 +143,11 @@ class NtdllHooks
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
-        if (ModuleFileName == nullptr || ModuleFileName->Length == 0)
+        if (ModuleFileName == nullptr || ModuleFileName->Length == 0 || ModuleFileName->Buffer == nullptr ||
+            ModuleFileName->Length % sizeof(wchar_t) != 0 || ModuleFileName->Length > ModuleFileName->MaximumLength)
             return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
 
-        std::wstring_view name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        const std::wstring name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
 
 #ifdef _DEBUG
         // LOG_DEBUG("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
@@ -152,11 +159,8 @@ class NtdllHooks
         if (LibraryLoadHooks::IsApiSetName(name))
             return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
 
-        std::wstring_view path;
-        if (PathToFile == nullptr || PathToFile->Length == 0)
-            path = name;
-        else
-            path = std::wstring_view(PathToFile->Buffer, PathToFile->Length / sizeof(wchar_t));
+        // PathToFile is the native search path, not the requested module filename.
+        const auto& path = name;
 
         if (State::SkipDllChecks())
         {
@@ -191,7 +195,9 @@ class NtdllHooks
             }
         }
 
+        SetLastError(entryError);
         const NTSTATUS status = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const DWORD originalError = GetLastError();
 
         // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
         if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
@@ -200,6 +206,7 @@ class NtdllHooks
             LibraryLoadHooks::HandleCallerModule(std::wstring(name), fullPath.c_str(), (HMODULE) *ModuleHandle);
         }
 
+        SetLastError(originalError);
         return status;
     }
 
