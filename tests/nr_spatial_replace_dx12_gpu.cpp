@@ -317,8 +317,8 @@ void Record(Game& g, UINT frame, ID3D12GraphicsCommandList* l)
     l->SetPipelineState(g.scenePso.Get());
     const float pan = 0.7f * float(frame);
     l->SetGraphicsRoot32BitConstants(0, 1, &pan, 0);
-    const D3D12_VIEWPORT scene { 0, 0, float(g.texW), float(g.texH), 0, 1 };
-    const D3D12_RECT sceneRect { 0, 0, LONG(g.texW), LONG(g.texH) };
+    const D3D12_VIEWPORT scene { 0, 0, float(g.inW), float(g.inH), 0, 1 };
+    const D3D12_RECT sceneRect { 0, 0, LONG(g.inW), LONG(g.inH) };
     l->RSSetViewports(1, &scene);
     l->RSSetScissorRects(1, &sceneRect);
     l->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
