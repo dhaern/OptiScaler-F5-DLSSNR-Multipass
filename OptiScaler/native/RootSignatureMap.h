@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include "SpatialTracking.h"
 
 namespace native::rootsig
 {
@@ -26,6 +27,7 @@ namespace detail
 struct Record
 {
     ID3D12RootSignature* signature;
+    spatial_tracking::Device* device = nullptr;
     Record* next;
     ID3D12VersionedRootSignatureDeserializer* deserializer = nullptr;
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc = nullptr;
@@ -41,7 +43,7 @@ inline D3D12_DESCRIPTOR_RANGE_TYPE Type(D3D12_ROOT_PARAMETER_TYPE type)
 }
 } // namespace detail
 
-inline void OnCreate(ID3D12RootSignature* rs, const void* blob, size_t size)
+inline void OnCreate(ID3D12RootSignature* rs, const void* blob, size_t size, spatial_tracking::Device* device = nullptr)
 {
     if (!rs)
         return;
@@ -50,12 +52,21 @@ inline void OnCreate(ID3D12RootSignature* rs, const void* blob, size_t size)
         if (r->signature == rs)
             r->active.store(false, std::memory_order_relaxed);
     if (size > SIZE_MAX - sizeof(detail::Record))
+    {
+        if (device)
+            device->rootFailed.store(true, std::memory_order_release);
         return;
+    }
     auto* storage = VirtualAlloc(nullptr, sizeof(detail::Record) + size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!storage)
+    {
+        if (device)
+            device->rootFailed.store(true, std::memory_order_release);
         return;
+    }
     auto* r = new (storage) detail::Record {};
     r->signature = rs;
+    r->device = device;
     // Keep the bytes and deserializer alive: descriptions reference their storage, not the caller's blob.
     if (blob && size)
     {
@@ -75,14 +86,27 @@ inline void OnCreate(ID3D12RootSignature* rs, const void* blob, size_t size)
     } while (!bucket.compare_exchange_weak(head, r, std::memory_order_release, std::memory_order_relaxed));
 }
 
-// The layout of a signature seen at creation, or null (made before the hooks, or a blob that did not deserialize)
+// Absence and failed parsing are deliberately different: only an absent old signature may use inference.
+inline bool MayInfer(ID3D12RootSignature* rs, spatial_tracking::Device* device)
+{
+    if (!rs || !spatial_tracking::Available(device) || device->rootFailed.load(std::memory_order_acquire))
+        return false;
+    for (auto* r = detail::buckets[detail::Hash(rs)].load(std::memory_order_acquire); r; r = r->next)
+        if (r->signature == rs && r->active.load(std::memory_order_acquire))
+            return false;
+    return true;
+}
+
+// The layout of a signature seen at creation. Null alone is NOT evidence of an unknown old object.
 inline const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Layout(ID3D12RootSignature* rs)
 {
     auto* r = rs ? detail::buckets[detail::Hash(rs)].load(std::memory_order_acquire) : nullptr;
     for (; r && r->signature != rs; r = r->next)
     {
     }
-    return r && r->active.load(std::memory_order_relaxed) ? r->desc : nullptr;
+    return r && r->active.load(std::memory_order_acquire) && (!r->device || spatial_tracking::Available(r->device))
+               ? r->desc
+               : nullptr;
 }
 
 inline Slot Find(ID3D12RootSignature* rs, D3D12_DESCRIPTOR_RANGE_TYPE type, UINT reg, UINT space, bool compute)

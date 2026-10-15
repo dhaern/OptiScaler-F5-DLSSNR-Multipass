@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d12.h>
 #include <cstdint>
+#include "SpatialTracking.h"
 
 namespace native::descriptors
 {
@@ -29,17 +30,17 @@ struct HeapRef
     UINT increment = 0;
 };
 
-void OnCreateHeap(ID3D12DescriptorHeap*, const D3D12_DESCRIPTOR_HEAP_DESC&, UINT increment);
-HeapRef FindHeap(ID3D12DescriptorHeap*);
-// FindHeap, registering a shader-visible heap made before our hooks when it is first bound
-HeapRef Adopt(ID3D12DescriptorHeap*);
+void OnCreateHeap(ID3D12DescriptorHeap*, const D3D12_DESCRIPTOR_HEAP_DESC&, UINT increment, spatial_tracking::Device*);
+HeapRef FindHeap(ID3D12DescriptorHeap*, spatial_tracking::Device*);
+// Known metadata first. Unknown old heaps use bounded inline metadata, never a hot shadow allocation or migration.
+HeapRef ResolveBoundHeap(ID3D12DescriptorHeap*, spatial_tracking::Device*);
 // The handle increment of a CBV_SRV_UAV or RTV heap type, as the device gives it (0 until known)
-UINT Increment(D3D12_DESCRIPTOR_HEAP_TYPE);
-void NoteIncrement(D3D12_DESCRIPTOR_HEAP_TYPE, UINT);
-void OnCreateView(Kind, ID3D12Resource*, const void* viewDesc, D3D12_CPU_DESCRIPTOR_HANDLE);
-void OnCopySimple(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE);
+UINT Increment(D3D12_DESCRIPTOR_HEAP_TYPE, spatial_tracking::Device*);
+void OnCreateView(Kind, ID3D12Resource*, const void* viewDesc, D3D12_CPU_DESCRIPTOR_HANDLE, spatial_tracking::Device*);
+void OnCopySimple(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE,
+                  spatial_tracking::Device*);
 void OnCopy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT ns, const D3D12_CPU_DESCRIPTOR_HANDLE*,
-            const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
-bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE, View*);
+            const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE, spatial_tracking::Device*);
+bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE, View*, spatial_tracking::Device*);
 bool LookupGpu(const HeapRef&, D3D12_GPU_DESCRIPTOR_HANDLE, View*);
 } // namespace native::descriptors

@@ -10,6 +10,8 @@ namespace native::descriptors
 struct Heap
 {
     ID3D12DescriptorHeap* object;
+    spatial_tracking::Device* device;
+    bool late = false;
     SIZE_T cpu;
     UINT64 gpu;
     UINT count, increment;
@@ -32,7 +34,24 @@ struct Registry
 constinit std::atomic<Registry*> registry {};
 constinit std::atomic<Heap*> lastHeap {};
 SRWLOCK creationLock = SRWLOCK_INIT;
-constinit std::atomic<UINT> increments[2] {}; // CBV_SRV_UAV, RTV: per device, the same for every heap of a type
+// Late metadata is bounded and inline. No heap-size allocation, blocking registration or shadow migration at bind.
+struct Late
+{
+    std::atomic<ID3D12DescriptorHeap*> key {};
+    std::atomic<bool> ready {};
+    Heap heap {};
+};
+constinit Late lateHeaps[256] {};
+constinit std::atomic_flag lateOwner = ATOMIC_FLAG_INIT;
+struct LateClaim
+{
+    bool owned = !lateOwner.test_and_set(std::memory_order_acquire);
+    ~LateClaim()
+    {
+        if (owned)
+            lateOwner.clear(std::memory_order_release);
+    }
+};
 
 // Views written into heaps made before our hooks, by CPU handle. Insert-only; a heap seen later takes precedence.
 struct Loose
@@ -41,28 +60,35 @@ struct Loose
     Heap::Shadow view;
 };
 constexpr size_t kLoose = size_t(1) << 16, kProbe = 32;
-constinit std::atomic<Loose*> looseTable {};
 
-void Retire(ID3D12DescriptorHeap* object, SIZE_T cpu, size_t bytes)
+void Retire(ID3D12DescriptorHeap* object, SIZE_T cpu, size_t bytes, spatial_tracking::Device* device)
 {
+    const auto retire = [&](Heap* h)
+    {
+        if (h->device == device &&
+            (h->object == object || (cpu < h->cpu + size_t(h->count) * h->increment && h->cpu < cpu + bytes)))
+            h->active.store(false, std::memory_order_release);
+    };
     const Registry* r = registry.load(std::memory_order_acquire);
     for (size_t i = 0; r && i < r->count; ++i)
-    {
-        Heap* h = r->heaps[i];
-        if (h->object == object || (cpu < h->cpu + size_t(h->count) * h->increment && h->cpu < cpu + bytes))
-            h->active.store(false, std::memory_order_relaxed);
-    }
+        retire(r->heaps[i]);
+    for (auto& slot : lateHeaps)
+        if (slot.ready.load(std::memory_order_acquire))
+            retire(&slot.heap);
 }
 
-bool Contains(const Heap* h, SIZE_T cpu)
+bool Contains(const Heap* h, SIZE_T cpu, spatial_tracking::Device* device)
 {
-    return h && h->active.load(std::memory_order_relaxed) && cpu >= h->cpu &&
+    return h && h->device == device && spatial_tracking::Available(device) &&
+           h->active.load(std::memory_order_acquire) && cpu >= h->cpu &&
            cpu - h->cpu < size_t(h->count) * h->increment && (cpu - h->cpu) % h->increment == 0;
 }
-Heap* FindCpu(SIZE_T cpu)
+Heap* FindCpu(SIZE_T cpu, spatial_tracking::Device* device)
 {
+    if (!spatial_tracking::Available(device))
+        return nullptr;
     Heap* h = lastHeap.load(std::memory_order_acquire);
-    if (Contains(h, cpu))
+    if (Contains(h, cpu, device))
         return h;
     const Registry* r = registry.load(std::memory_order_acquire);
     if (!r)
@@ -71,20 +97,24 @@ Heap* FindCpu(SIZE_T cpu)
     while (lo < hi)
     {
         const size_t mid = lo + (hi - lo) / 2;
-        if (r->heaps[mid]->cpu <= cpu)
+        if (r->heaps[mid]->device->generation < device->generation ||
+            (r->heaps[mid]->device == device && r->heaps[mid]->cpu <= cpu))
             lo = mid + 1;
         else
             hi = mid;
     }
     h = lo ? r->heaps[lo - 1] : nullptr;
-    if (!Contains(h, cpu))
+    if (!Contains(h, cpu, device))
         return nullptr;
     lastHeap.store(h, std::memory_order_release);
     return h;
 }
-Heap::Shadow* LooseSlot(SIZE_T cpu, bool create)
+Heap::Shadow* LooseSlot(SIZE_T cpu, bool create, spatial_tracking::Device* device)
 {
-    Loose* table = looseTable.load(std::memory_order_acquire);
+    if (!spatial_tracking::Available(device) || device->descriptorFailed.load(std::memory_order_acquire))
+        return nullptr;
+    device->looseOperations.fetch_add(1, std::memory_order_relaxed);
+    Loose* table = static_cast<Loose*>(device->loose.load(std::memory_order_acquire));
     if (!table)
     {
         if (!create)
@@ -93,10 +123,15 @@ Heap::Shadow* LooseSlot(SIZE_T cpu, bool create)
             static_cast<Loose*>(VirtualAlloc(nullptr, kLoose * sizeof(Loose), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!fresh)
             return nullptr;
-        if (looseTable.compare_exchange_strong(table, fresh, std::memory_order_acq_rel, std::memory_order_acquire))
+        void* expected = table;
+        if (device->loose.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire))
             table = fresh;
         else
+        {
             VirtualFree(fresh, 0, MEM_RELEASE);
+            table = static_cast<Loose*>(expected);
+        }
     }
     const size_t start = size_t((uint64_t(cpu) * 0x9E3779B97F4A7C15ull) >> 48);
     for (size_t i = 0; i < kProbe; ++i)
@@ -117,12 +152,17 @@ Heap::Shadow* LooseSlot(SIZE_T cpu, bool create)
     return nullptr;
 }
 // One descriptor's shadow: its heap's when the heap was seen (and of the type), else the loose table's
-Heap::Shadow* Slot(SIZE_T cpu, bool rtv, bool create)
+Heap::Shadow* Slot(SIZE_T cpu, bool rtv, bool create, spatial_tracking::Device* device)
 {
-    if (Heap* h = FindCpu(cpu))
+    if (Heap* h = FindCpu(cpu, device))
         return h->views && (h->type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) == rtv
                    ? &h->views[(cpu - h->cpu) / h->increment] : nullptr;
-    return LooseSlot(cpu, create);
+    if (!spatial_tracking::Available(device) || (!create && !device->loose.load(std::memory_order_acquire)))
+        return nullptr;
+    auto* slot = LooseSlot(cpu, create, device);
+    if (create)
+        (slot ? device->looseWrites : device->looseFailure).fetch_add(1, std::memory_order_relaxed);
+    return slot;
 }
 View Read(const Heap::Shadow& s)
 {
@@ -333,13 +373,15 @@ View MakeView(Kind kind, ID3D12Resource* resource, const void* desc)
 }
 } // namespace
 
-void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC& desc, UINT increment)
+void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC& desc, UINT increment,
+                  spatial_tracking::Device* device)
 {
-    if (!object || !increment || !desc.NumDescriptors || desc.Type >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES)
+    if (!device || !device->active.load(std::memory_order_acquire) || !object || !increment || !desc.NumDescriptors ||
+        desc.Type >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES)
         return;
     const bool tracked = desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     if (tracked)
-        increments[desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
+        device->increments[desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
     const SIZE_T cpu = object->GetCPUDescriptorHandleForHeapStart().ptr;
     const size_t bytes = size_t(desc.NumDescriptors) * increment;
     if (bytes / increment != desc.NumDescriptors || cpu > SIZE_MAX - bytes ||
@@ -348,7 +390,8 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
     auto* h = static_cast<Heap*>(VirtualAlloc(nullptr, sizeof(Heap), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!h)
     {
-        Retire(object, cpu, bytes);
+        Retire(object, cpu, bytes, device);
+        device->descriptorFailed.store(true, std::memory_order_release);
         return;
     }
     new (h) Heap {};
@@ -357,11 +400,13 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
                                                          MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (tracked && !h->views)
     {
-        Retire(object, cpu, bytes);
+        Retire(object, cpu, bytes, device);
+        device->descriptorFailed.store(true, std::memory_order_release);
         VirtualFree(h, 0, MEM_RELEASE);
         return;
     }
     h->object = object;
+    h->device = device;
     h->cpu = cpu;
     h->count = desc.NumDescriptors;
     h->increment = increment;
@@ -373,7 +418,9 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
     const size_t capacity = old ? old->count + 1 : 1;
     auto* next = static_cast<Registry*>(
         VirtualAlloc(nullptr, sizeof(Registry) + capacity * sizeof(Heap*), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    Retire(object, cpu, bytes);
+    Retire(object, cpu, bytes, device);
+    if (!next)
+        device->descriptorFailed.store(true, std::memory_order_release);
     if (next)
     {
         next->heaps = reinterpret_cast<Heap**>(next + 1);
@@ -385,7 +432,8 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
                 next->heaps[next->count++] = previous;
         }
         size_t at = next->count;
-        while (at && next->heaps[at - 1]->cpu > cpu)
+        while (at && (next->heaps[at - 1]->device->generation > device->generation ||
+                      (next->heaps[at - 1]->device == device && next->heaps[at - 1]->cpu > cpu)))
         {
             next->heaps[at] = next->heaps[at - 1];
             --at;
@@ -403,50 +451,94 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
         VirtualFree(h, 0, MEM_RELEASE);
     }
 }
-HeapRef FindHeap(ID3D12DescriptorHeap* object)
+HeapRef FindHeap(ID3D12DescriptorHeap* object, spatial_tracking::Device* device)
 {
+    if (!spatial_tracking::Available(device))
+        return {};
     const Registry* r = registry.load(std::memory_order_acquire);
     for (size_t i = 0; object && r && i < r->count; ++i)
-        if (r->heaps[i]->object == object && r->heaps[i]->active.load(std::memory_order_relaxed))
+        if (r->heaps[i]->device == device && r->heaps[i]->object == object &&
+            r->heaps[i]->active.load(std::memory_order_acquire))
             return { r->heaps[i], r->heaps[i]->increment };
     return {};
 }
-UINT Increment(D3D12_DESCRIPTOR_HEAP_TYPE type)
+UINT Increment(D3D12_DESCRIPTOR_HEAP_TYPE type, spatial_tracking::Device* device)
 {
-    return type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV
-               ? increments[type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].load(std::memory_order_relaxed)
+    return spatial_tracking::Available(device) &&
+                   (type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
+               ? device->increments[type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].load(std::memory_order_relaxed)
                : 0;
 }
-void NoteIncrement(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT increment)
+
+HeapRef ResolveBoundHeap(ID3D12DescriptorHeap* object, spatial_tracking::Device* device)
 {
-    if (type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
-        increments[type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
+    if (!object || !spatial_tracking::Available(device) || device->descriptorFailed.load(std::memory_order_acquire))
+        return {};
+    device->heapAttempts.fetch_add(1, std::memory_order_relaxed);
+    LateClaim claim;
+    if (!claim.owned)
+    {
+        device->heapFailure.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
+    const auto result = [&](const Heap& h) -> HeapRef
+    {
+        if (!h.active.load(std::memory_order_acquire) || h.device != device)
+        {
+            device->heapFailure.fetch_add(1, std::memory_order_relaxed);
+            return {};
+        }
+        (h.type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER || h.type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV ? device->heapIgnored
+                                                                                                  : device->heapSuccess)
+            .fetch_add(1, std::memory_order_relaxed);
+        return { &h, h.increment };
+    };
+    for (auto& slot : lateHeaps)
+        if (slot.key.load(std::memory_order_acquire) == object)
+            return slot.ready.load(std::memory_order_acquire) ? result(slot.heap) : HeapRef {};
+    for (auto& slot : lateHeaps)
+    {
+        ID3D12DescriptorHeap* empty = nullptr;
+        if (!slot.key.compare_exchange_strong(empty, object, std::memory_order_acq_rel))
+            continue;
+        Heap& h = slot.heap;
+        h.object = object;
+        h.device = device;
+        h.late = true;
+        device->heapQueries.fetch_add(1, std::memory_order_relaxed);
+        const auto desc = object->GetDesc();
+        ID3D12Device* owner = nullptr;
+        const bool matches = SUCCEEDED(object->GetDevice(IID_PPV_ARGS(&owner))) &&
+                             owner == device->object.load(std::memory_order_acquire);
+        if (owner)
+            owner->Release();
+        h.type = desc.Type;
+        h.count = desc.NumDescriptors;
+        h.increment = Increment(desc.Type, device);
+        const bool ignored =
+            desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        if (ignored)
+            h.increment = 1; // No descriptor shadow or GPU lookup will use ignored metadata.
+        h.cpu = object->GetCPUDescriptorHandleForHeapStart().ptr;
+        h.gpu = (desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) && !ignored
+                    ? object->GetGPUDescriptorHandleForHeapStart().ptr
+                    : 0;
+        h.active.store(matches && h.count && h.increment && UINT64(h.count) * h.increment <= SIZE_MAX - h.cpu,
+                       std::memory_order_release);
+        slot.ready.store(true, std::memory_order_release);
+        return result(h);
+    }
+    device->heapFailure.fetch_add(1, std::memory_order_relaxed);
+    return {};
 }
-HeapRef Adopt(ID3D12DescriptorHeap* object)
+bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE cpu, View* out, spatial_tracking::Device* device)
 {
-    HeapRef ref = FindHeap(object);
-    if (ref.heap || !object)
-        return ref;
-    // Made before our hooks: shader-visible heaps are seen here when bound; their descriptors are copied in afterwards
-    const auto desc = object->GetDesc();
-    ID3D12Device* device = nullptr;
-    if (!(desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) || FAILED(object->GetDevice(IID_PPV_ARGS(&device))))
-        return ref;
-    const UINT increment = device->GetDescriptorHandleIncrementSize(desc.Type);
-    device->Release();
-    OnCreateHeap(object, desc, increment);
-    ref = FindHeap(object);
-    // What was written into it before, kept by CPU handle until now
-    if (auto* h = const_cast<Heap*>(ref.heap); h && h->views && looseTable.load(std::memory_order_acquire))
-        for (UINT i = 0; i < h->count; ++i)
-            if (const Heap::Shadow* loose = LooseSlot(h->cpu + size_t(i) * h->increment, false))
-                Write(h->views[i], Read(*loose));
-    return ref;
-}
-bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE cpu, View* out)
-{
-    Heap* h = FindCpu(cpu.ptr);
-    const Heap::Shadow* s = h ? (h->views ? &h->views[(cpu.ptr - h->cpu) / h->increment] : nullptr) : LooseSlot(cpu.ptr, false);
+    if (!spatial_tracking::Available(device))
+        return false;
+    Heap* h = FindCpu(cpu.ptr, device);
+    const Heap::Shadow* s =
+        h ? (h->views ? &h->views[(cpu.ptr - h->cpu) / h->increment] : nullptr)
+          : (device->loose.load(std::memory_order_acquire) ? LooseSlot(cpu.ptr, false, device) : nullptr);
     if (!s || !out)
         return false;
     *out = Read(*s);
@@ -455,24 +547,31 @@ bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE cpu, View* out)
 bool LookupGpu(const HeapRef& ref, D3D12_GPU_DESCRIPTOR_HANDLE gpu, View* out)
 {
     const Heap* h = ref.heap;
-    if (!h || !h->views || !out || !h->gpu || !h->active.load(std::memory_order_relaxed) || gpu.ptr < h->gpu ||
+    if (!h || !spatial_tracking::Available(h->device) || !out || !h->gpu ||
+        !h->active.load(std::memory_order_acquire) || gpu.ptr < h->gpu ||
         gpu.ptr - h->gpu >= UINT64(h->count) * h->increment || (gpu.ptr - h->gpu) % h->increment)
         return false;
-    *out = Read(h->views[(gpu.ptr - h->gpu) / h->increment]);
+    const size_t index = size_t((gpu.ptr - h->gpu) / h->increment);
+    const auto* shadow =
+        h->views ? &h->views[index] : (h->late ? LooseSlot(h->cpu + index * h->increment, false, h->device) : nullptr);
+    if (!shadow)
+        return false;
+    *out = Read(*shadow);
     return out->kind != uint8_t(Kind::None);
 }
-void OnCreateView(Kind kind, ID3D12Resource* resource, const void* desc, D3D12_CPU_DESCRIPTOR_HANDLE cpu)
+void OnCreateView(Kind kind, ID3D12Resource* resource, const void* desc, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
+                  spatial_tracking::Device* device)
 {
-    if (Heap::Shadow* s = Slot(cpu.ptr, kind == Kind::Rtv, true))
+    if (Heap::Shadow* s = Slot(cpu.ptr, kind == Kind::Rtv, true, device))
         Write(*s, MakeView(kind, resource, desc));
 }
 void OnCopySimple(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
-                  D3D12_DESCRIPTOR_HEAP_TYPE type)
+                  D3D12_DESCRIPTOR_HEAP_TYPE type, spatial_tracking::Device* device)
 {
     if (type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
         return;
-    Heap* d = FindCpu(dst.ptr);
-    Heap* s = FindCpu(src.ptr);
+    Heap* d = FindCpu(dst.ptr, device);
+    Heap* s = FindCpu(src.ptr, device);
     if (d && s && d->type == type && s->type == type)
     {
         const size_t di = (dst.ptr - d->cpu) / d->increment, si = (src.ptr - s->cpu) / s->increment;
@@ -485,19 +584,20 @@ void OnCopySimple(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_
     }
     // Either side in a heap made before our hooks: one descriptor at a time
     const bool rtv = type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    const size_t step = increments[rtv].load(std::memory_order_relaxed);
+    const size_t step = Increment(type, device);
     if (!step)
         return;
     for (UINT i = 0; i < n; ++i)
     {
-        const Heap::Shadow* from = Slot(src.ptr + i * step, rtv, false);
+        const Heap::Shadow* from = Slot(src.ptr + i * step, rtv, false, device);
         const View v = from ? Read(*from) : View {};
-        if (Heap::Shadow* to = Slot(dst.ptr + i * step, rtv, v.kind != uint8_t(Kind::None)))
+        if (Heap::Shadow* to = Slot(dst.ptr + i * step, rtv, v.kind != uint8_t(Kind::None), device))
             Write(*to, v);
     }
 }
 void OnCopy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE* dst, const UINT* dn, UINT ns,
-            const D3D12_CPU_DESCRIPTOR_HANDLE* src, const UINT* sn, D3D12_DESCRIPTOR_HEAP_TYPE type)
+            const D3D12_CPU_DESCRIPTOR_HANDLE* src, const UINT* sn, D3D12_DESCRIPTOR_HEAP_TYPE type,
+            spatial_tracking::Device* device)
 {
     if (!dst || !src || (type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV))
         return;
@@ -517,11 +617,11 @@ void OnCopy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE* dst, const UINT* dn, UIN
             si = 0;
             continue;
         }
-        const size_t step = increments[type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].load(std::memory_order_relaxed);
+        const size_t step = Increment(type, device);
         if (!step)
             return;
         const UINT n = dc - di < sc - si ? dc - di : sc - si;
-        OnCopySimple(n, { dst[d].ptr + di * step }, { src[s].ptr + si * step }, type);
+        OnCopySimple(n, { dst[d].ptr + di * step }, { src[s].ptr + si * step }, type, device);
         di += n;
         si += n;
     }

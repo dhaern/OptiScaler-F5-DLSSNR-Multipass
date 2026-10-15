@@ -17,6 +17,7 @@ struct ListState
     static constexpr int kMaxRoot = 64; // root parameters tracked per signature (D3D12 allows up to 64 DWORDs)
 
     uint32_t generation = 0; // bumped by Begin(); lets callers notice a Reset
+    spatial_tracking::Device* device = nullptr; // cold creation/first Reset association, preserved across Reset
     bool forwarding = false;
     bool inEnvelope = false;           // true while we record our own work: our calls are not tracked
     ID3D12DescriptorHeap* heaps[2] {}; // as last set (CBV_SRV_UAV, SAMPLER), count in heapCount
@@ -477,7 +478,11 @@ inline void OnSetDescriptorHeaps(ListState& s, UINT count, ID3D12DescriptorHeap*
     s.heaps[1] = count > 1 ? heaps[1] : nullptr;
     s.heapCount = count;
     for (UINT i = 0; i < 2; ++i)
-        s.heapRefs[i] = descriptors::Adopt(s.heaps[i]);
+    {
+        s.heapRefs[i] = descriptors::FindHeap(s.heaps[i], s.device);
+        if (!s.heapRefs[i].heap)
+            s.heapRefs[i] = descriptors::ResolveBoundHeap(s.heaps[i], s.device);
+    }
     s.graphicsTableMask = 0;
     s.computeTableMask = 0;
 }

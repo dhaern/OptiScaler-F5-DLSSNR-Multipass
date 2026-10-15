@@ -8,6 +8,7 @@
 #include <chrono>
 
 static int failures = 0;
+static native::spatial_tracking::Device tracking;
 static void Check(bool ok, const char* what)
 {
     if (!ok)
@@ -85,8 +86,9 @@ static void Lists()
     auto* initial = Pointer<ID3D12PipelineState>(0x1200);
     table.Begin(list, initial);
     ListState& s = *table.Find(list);
+    s.device = &tracking;
     FakeHeap heap(0x700000, 0x800000, 16);
-    descriptors::OnCreateHeap(&heap, heap.desc, 32);
+    descriptors::OnCreateHeap(&heap, heap.desc, 32, &tracking);
     ID3D12DescriptorHeap* heaps[] = { &heap };
     OnSetDescriptorHeaps(s, 1, heaps);
     Check(s.heapRefs[0].heap != nullptr, "per-list heap reference");
@@ -186,88 +188,92 @@ static void Descriptors()
 {
     using namespace native::descriptors;
     FakeHeap sampler(0x400000, 0xb00000, 16, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-    OnCreateHeap(&sampler, sampler.desc, 16);
+    OnCreateHeap(&sampler, sampler.desc, 16, &tracking);
     for (UINT i = 0; i < 128; ++i)
-        Check(FindHeap(&sampler).heap != nullptr, "ignored sampler is known metadata");
+        Check(FindHeap(&sampler, &tracking).heap != nullptr, "ignored sampler is known metadata");
     Check(sampler.descCalls == 0 && sampler.deviceCalls == 0, "known sampler needs no late object queries");
     FakeHeap cpu(0x100000, 0, 16), gpu(0x200000, 0x900000, 16), rtv(0x300000, 0, 16, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    OnCreateHeap(&cpu, cpu.desc, 32);
-    OnCreateHeap(&gpu, gpu.desc, 32);
-    OnCreateHeap(&rtv, rtv.desc, 16);
+    OnCreateHeap(&cpu, cpu.desc, 32, &tracking);
+    OnCreateHeap(&gpu, gpu.desc, 32, &tracking);
+    OnCreateHeap(&rtv, rtv.desc, 16, &tracking);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
     srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = 1;
     auto* resource = Pointer<ID3D12Resource>(0xabc0);
-    OnCreateView(Kind::Srv, resource, &srv, { cpu.cpu });
+    OnCreateView(Kind::Srv, resource, &srv, { cpu.cpu }, &tracking);
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbv { 0x123400, 256 };
-    OnCreateView(Kind::Cbv, nullptr, &cbv, { cpu.cpu + 32 });
+    OnCreateView(Kind::Cbv, nullptr, &cbv, { cpu.cpu + 32 }, &tracking);
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav {};
     uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
     uav.Texture2DArray = { 2, 3, 4, 1 };
-    OnCreateView(Kind::Uav, resource, &uav, { cpu.cpu + 64 });
-    OnCopySimple(3, { gpu.cpu }, { cpu.cpu }, cpu.desc.Type);
+    OnCreateView(Kind::Uav, resource, &uav, { cpu.cpu + 64 }, &tracking);
+    OnCopySimple(3, { gpu.cpu }, { cpu.cpu }, cpu.desc.Type, &tracking);
     View v;
-    Check(Lookup({ gpu.cpu }, &v) && v.resource == resource && v.format == srv.Format, "CPU to visible simple copy");
-    auto ref = FindHeap(&gpu);
+    Check(Lookup({ gpu.cpu }, &v, &tracking) && v.resource == resource && v.format == srv.Format,
+          "CPU to visible simple copy");
+    auto ref = FindHeap(&gpu, &tracking);
     Check(LookupGpu(ref, { gpu.gpu + 32 }, &v) && v.va == cbv.BufferLocation && !v.resource && v.size == 256,
           "CBV GPU lookup");
     Check(LookupGpu(ref, { gpu.gpu + 64 }, &v) && v.kind == uint8_t(Kind::Uav) && v.mip == 2 && v.plane == 1 &&
               v.firstSlice == 3 && v.sliceCount == 4,
           "UAV view metadata copied");
-    Check(!Lookup({ cpu.cpu + 1 }, &v) && !Lookup({ cpu.cpu + 16 * 32 }, &v), "CPU handles aligned and end exclusive");
+    Check(!Lookup({ cpu.cpu + 1 }, &v, &tracking) && !Lookup({ cpu.cpu + 16 * 32 }, &v, &tracking),
+          "CPU handles aligned and end exclusive");
     Check(!LookupGpu(ref, { gpu.gpu + 16 * 32 }, &v) && !LookupGpu(ref, { gpu.gpu + 1 }, &v),
           "GPU bounds and alignment");
     const D3D12_CPU_DESCRIPTOR_HANDLE dst[] = { { gpu.cpu + 4 * 32 }, { gpu.cpu + 8 * 32 } };
     const D3D12_CPU_DESCRIPTOR_HANDLE src[] = { { cpu.cpu }, { cpu.cpu + 2 * 32 } };
     const UINT dn[] = { 1, 2 }, sn[] = { 2, 1 };
-    OnCopy(2, dst, dn, 2, src, sn, cpu.desc.Type);
-    Check(Lookup(dst[0], &v) && v.kind == uint8_t(Kind::Srv), "ranged CPU to visible first range");
-    Check(Lookup(dst[1], &v) && v.va == cbv.BufferLocation, "ranged copy across source boundary");
-    Check(Lookup({ gpu.cpu + 9 * 32 }, &v) && v.mip == 2, "ranged copy across destination boundary");
+    OnCopy(2, dst, dn, 2, src, sn, cpu.desc.Type, &tracking);
+    Check(Lookup(dst[0], &v, &tracking) && v.kind == uint8_t(Kind::Srv), "ranged CPU to visible first range");
+    Check(Lookup(dst[1], &v, &tracking) && v.va == cbv.BufferLocation, "ranged copy across source boundary");
+    Check(Lookup({ gpu.cpu + 9 * 32 }, &v, &tracking) && v.mip == 2, "ranged copy across destination boundary");
     const D3D12_CPU_DESCRIPTOR_HANDLE dstUnit[] = { { gpu.cpu + 4 * 32 }, { gpu.cpu + 5 * 32 } };
     const D3D12_CPU_DESCRIPTOR_HANDLE srcUnit[] = { { cpu.cpu }, { cpu.cpu + 32 } };
-    OnCopy(2, dstUnit, nullptr, 2, srcUnit, nullptr, cpu.desc.Type);
-    Check(Lookup(dstUnit[1], &v) && v.va == cbv.BufferLocation, "null range sizes mean one descriptor");
+    OnCopy(2, dstUnit, nullptr, 2, srcUnit, nullptr, cpu.desc.Type, &tracking);
+    Check(Lookup(dstUnit[1], &v, &tracking) && v.va == cbv.BufferLocation, "null range sizes mean one descriptor");
     D3D12_RENDER_TARGET_VIEW_DESC rd {};
     rd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     rd.Texture2D.MipSlice = 1;
-    OnCreateView(Kind::Rtv, resource, &rd, { rtv.cpu });
-    OnCopySimple(1, { rtv.cpu + 16 }, { rtv.cpu }, rtv.desc.Type);
-    Check(Lookup({ rtv.cpu + 16 }, &v) && v.kind == uint8_t(Kind::Rtv) && v.mip == 1, "RTV shadow copy");
-    OnCopySimple(1, { gpu.cpu + 6 * 32 }, { 0xdead }, cpu.desc.Type);
-    Check(!Lookup({ gpu.cpu + 6 * 32 }, &v), "unknown source clears destination");
+    OnCreateView(Kind::Rtv, resource, &rd, { rtv.cpu }, &tracking);
+    OnCopySimple(1, { rtv.cpu + 16 }, { rtv.cpu }, rtv.desc.Type, &tracking);
+    Check(Lookup({ rtv.cpu + 16 }, &v, &tracking) && v.kind == uint8_t(Kind::Rtv) && v.mip == 1, "RTV shadow copy");
+    OnCopySimple(1, { gpu.cpu + 6 * 32 }, { 0xdead }, cpu.desc.Type, &tracking);
+    Check(!Lookup({ gpu.cpu + 6 * 32 }, &v, &tracking), "unknown source clears destination");
     const D3D12_CPU_DESCRIPTOR_HANDLE unknown[] = { { 0xdead } };
     const D3D12_CPU_DESCRIPTOR_HANDLE stale[] = { { gpu.cpu + 32 } };
-    OnCopy(1, stale, nullptr, 1, unknown, nullptr, cpu.desc.Type);
-    Check(!Lookup(stale[0], &v), "unknown ranged source clears destination");
-    OnCreateView(Kind::Srv, nullptr, &srv, { cpu.cpu + 10 * 32 });
-    Check(Lookup({ cpu.cpu + 10 * 32 }, &v) && !v.resource, "null descriptor does not preserve stale resource");
+    OnCopy(1, stale, nullptr, 1, unknown, nullptr, cpu.desc.Type, &tracking);
+    Check(!Lookup(stale[0], &v, &tracking), "unknown ranged source clears destination");
+    OnCreateView(Kind::Srv, nullptr, &srv, { cpu.cpu + 10 * 32 }, &tracking);
+    Check(Lookup({ cpu.cpu + 10 * 32 }, &v, &tracking) && !v.resource,
+          "null descriptor does not preserve stale resource");
     constexpr UINT iterations = 1000000;
     volatile uintptr_t observed = 0;
     auto start = std::chrono::steady_clock::now();
     for (UINT i = 0; i < iterations; ++i)
     {
-        Lookup({ cpu.cpu }, &v);
+        Lookup({ cpu.cpu }, &v, &tracking);
         observed = uintptr_t(v.resource);
     }
     double lookupNs =
         std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / iterations;
     start = std::chrono::steady_clock::now();
     for (UINT i = 0; i < iterations; ++i)
-        OnCopySimple(1, { gpu.cpu }, { cpu.cpu }, cpu.desc.Type);
+        OnCopySimple(1, { gpu.cpu }, { cpu.cpu }, cpu.desc.Type, &tracking);
     double copyNs =
         std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / iterations;
     std::printf("bench: Lookup %.2f ns, OnCopySimple(1) %.2f ns (informative < 50 ns), observed %zx\n", lookupNs,
                 copyNs, size_t(observed));
     FakeHeap replacement(gpu.cpu + 32, 0xa00000, 4);
-    OnCreateHeap(&replacement, replacement.desc, 32);
+    OnCreateHeap(&replacement, replacement.desc, 32, &tracking);
     Check(!LookupGpu(ref, { gpu.gpu }, &v), "overlapping heap invalidates old GPU reference");
-    Check(!Lookup({ gpu.cpu }, &v) && !Lookup({ gpu.cpu + 10 * 32 }, &v), "overlap retires entire old CPU range");
-    OnCreateView(Kind::Srv, resource, &srv, { replacement.cpu });
-    Check(LookupGpu(FindHeap(&replacement), { replacement.gpu }, &v) && v.resource == resource,
+    Check(!Lookup({ gpu.cpu }, &v, &tracking) && !Lookup({ gpu.cpu + 10 * 32 }, &v, &tracking),
+          "overlap retires entire old CPU range");
+    OnCreateView(Kind::Srv, resource, &srv, { replacement.cpu }, &tracking);
+    Check(LookupGpu(FindHeap(&replacement, &tracking), { replacement.gpu }, &v) && v.resource == resource,
           "replacement heap works");
     std::puts("descriptors: simple/ranged copies, metadata, overlap checked");
 }
@@ -363,6 +369,8 @@ static void Roots()
 
 int main()
 {
+    tracking.ready.store(true);
+    tracking.generation = 1;
     Lists();
     Descriptors();
     Roots();

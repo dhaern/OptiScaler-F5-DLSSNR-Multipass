@@ -27,6 +27,18 @@ struct SpatialTag;
 constinit ListVtables<SpatialTag> g_tables;
 constinit ListStateTable g_lists;
 constinit std::atomic<bool> g_installed {};
+constexpr UINT kCreationSlots[] = { 10, 11, 12, 14, 16, 17, 18, 19, 20, 23, 24 };
+constinit std::atomic<void*> g_creationCode[std::size(kCreationSlots)] {};
+constinit std::atomic_flag g_installOwner = ATOMIC_FLAG_INIT;
+struct InstallClaim
+{
+    bool owned = !g_installOwner.test_and_set(std::memory_order_acquire);
+    ~InstallClaim()
+    {
+        if (owned)
+            g_installOwner.clear(std::memory_order_release);
+    }
+};
 constinit std::atomic<uint64_t> g_presents {}, g_fgPresents {}, g_easuFrame {}, g_rcasFrame {}, g_calls {}, g_binds {};
 constinit std::atomic<uint64_t> g_shapes[3] {}, g_refusals[size_t(Refusal::Count)] {}, g_constants {}, g_textureRect {};
 constinit std::atomic<uint32_t> g_examined {}, g_overflow {}, g_untracked {}, g_patchLogs {}, g_planLogs {};
@@ -40,7 +52,7 @@ constinit std::atomic<uint32_t> g_phase {};
 constinit std::atomic<uint64_t> g_otherDraws {};
 constinit std::atomic<int> g_jitterOff {}; // 1: motion vectors
 constinit std::atomic<bool> g_motionVectorsDecided {};
-UINT g_rtvIncrement = 0;
+
 constinit std::atomic<uint64_t> g_lastPassPresent {}, g_hudless {}, g_hudlessRefused {}, g_midList {};
 constinit std::atomic<bool> g_passSinceAdvance {}, g_movedLastFrame {};
 constinit std::atomic<double> g_fgPresentMs {};
@@ -140,6 +152,16 @@ ORIGINAL(Reset, List);
 ORIGINAL(Close, List);
 ORIGINAL(ExecuteCommandLists, ID3D12CommandQueue);
 #undef ORIGINAL
+spatial_tracking::Device* TrackingDevice(ID3D12Device* device)
+{
+    auto* tracking = spatial_tracking::Find(device);
+    if (spatial_tracking::Available(tracking) || !g_installed.load(std::memory_order_acquire))
+        return tracking;
+    // Device factories can bypass the D3D12CreateDevice export. Observe at an already-hooked cold creation boundary,
+    // never from draw/bind. Install's same-code check establishes coverage; it does not imply old objects were seen.
+    SpatialPassDx12::Install(device);
+    return spatial_tracking::Find(device);
+}
 void RegisterPipeline(ID3D12Device* device, ID3D12PipelineState* pso, const D3D12_SHADER_BYTECODE& code, Facts facts,
                       ID3D12RootSignature* signature, const char* source)
 {
@@ -168,7 +190,7 @@ void RegisterPipeline(ID3D12Device* device, ID3D12PipelineState* pso, const D3D1
         // blob.
         if (SUCCEEDED(o_CreateRootSignature(device, 0, code.pShaderBytecode, code.BytecodeLength,
                                             IID_PPV_ARGS(&p->signature))))
-            rootsig::OnCreate(p->signature, code.pShaderBytecode, code.BytecodeLength);
+            rootsig::OnCreate(p->signature, code.pShaderBytecode, code.BytecodeLength, TrackingDevice(device));
     }
     const bool compute = facts.shader.stage == Stage::Compute;
     p->input = rootsig::Find(p->signature, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, facts.shader.textureRegister,
@@ -364,7 +386,7 @@ HRESULT STDMETHODCALLTYPE hkCreateRootSignature(ID3D12Device* d, UINT node, cons
 {
     const auto hr = o_CreateRootSignature(d, node, blob, size, iid, out);
     if (SUCCEEDED(hr) && out)
-        rootsig::OnCreate(static_cast<ID3D12RootSignature*>(*out), blob, size);
+        rootsig::OnCreate(static_cast<ID3D12RootSignature*>(*out), blob, size, TrackingDevice(d));
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hkCreateDescriptorHeap(ID3D12Device* d, const D3D12_DESCRIPTOR_HEAP_DESC* desc, REFIID iid,
@@ -373,21 +395,21 @@ HRESULT STDMETHODCALLTYPE hkCreateDescriptorHeap(ID3D12Device* d, const D3D12_DE
     const auto hr = o_CreateDescriptorHeap(d, desc, iid, out);
     if (SUCCEEDED(hr) && desc && out)
         descriptors::OnCreateHeap(static_cast<ID3D12DescriptorHeap*>(*out), *desc,
-                                  d->GetDescriptorHandleIncrementSize(desc->Type));
+                                  d->GetDescriptorHandleIncrementSize(desc->Type), TrackingDevice(d));
     return hr;
 }
 void STDMETHODCALLTYPE hkCreateConstantBufferView(ID3D12Device* d, const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc,
                                                   D3D12_CPU_DESCRIPTOR_HANDLE dst)
 {
     o_CreateConstantBufferView(d, desc, dst);
-    descriptors::OnCreateView(descriptors::Kind::Cbv, nullptr, desc, dst);
+    descriptors::OnCreateView(descriptors::Kind::Cbv, nullptr, desc, dst, TrackingDevice(d));
 }
 #define VIEW_HOOK(Name, Type, ViewKind)                                                                                \
     void STDMETHODCALLTYPE hk##Name(ID3D12Device* d, ID3D12Resource* r, const Type* desc,                              \
                                     D3D12_CPU_DESCRIPTOR_HANDLE dst)                                                   \
     {                                                                                                                  \
         o_##Name(d, r, desc, dst);                                                                                     \
-        descriptors::OnCreateView(descriptors::Kind::ViewKind, r, desc, dst);                                          \
+        descriptors::OnCreateView(descriptors::Kind::ViewKind, r, desc, dst, TrackingDevice(d));                       \
     }
 VIEW_HOOK(CreateShaderResourceView, D3D12_SHADER_RESOURCE_VIEW_DESC, Srv)
 VIEW_HOOK(CreateRenderTargetView, D3D12_RENDER_TARGET_VIEW_DESC, Rtv)
@@ -397,24 +419,20 @@ void STDMETHODCALLTYPE hkCreateUnorderedAccessView(ID3D12Device* d, ID3D12Resour
                                                    D3D12_CPU_DESCRIPTOR_HANDLE dst)
 {
     o_CreateUnorderedAccessView(d, r, counter, desc, dst);
-    descriptors::OnCreateView(descriptors::Kind::Uav, counter ? nullptr : r, desc, dst);
+    descriptors::OnCreateView(descriptors::Kind::Uav, counter ? nullptr : r, desc, dst, TrackingDevice(d));
 }
 void STDMETHODCALLTYPE hkCopyDescriptorsSimple(ID3D12Device* d, UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst,
                                                D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE type)
 {
     o_CopyDescriptorsSimple(d, n, dst, src, type);
-    if (!descriptors::Increment(type))
-        descriptors::NoteIncrement(type, d->GetDescriptorHandleIncrementSize(type));
-    descriptors::OnCopySimple(n, dst, src, type);
+    descriptors::OnCopySimple(n, dst, src, type, TrackingDevice(d));
 }
 void STDMETHODCALLTYPE hkCopyDescriptors(ID3D12Device* d, UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE* dst,
                                          const UINT* dn, UINT ns, const D3D12_CPU_DESCRIPTOR_HANDLE* src,
                                          const UINT* sn, D3D12_DESCRIPTOR_HEAP_TYPE type)
 {
     o_CopyDescriptors(d, nd, dst, dn, ns, src, sn, type);
-    if (!descriptors::Increment(type))
-        descriptors::NoteIncrement(type, d->GetDescriptorHandleIncrementSize(type));
-    descriptors::OnCopy(nd, dst, dn, ns, src, sn, type);
+    descriptors::OnCopy(nd, dst, dn, ns, src, sn, type, TrackingDevice(d));
 }
 HRESULT STDMETHODCALLTYPE hkMap(ID3D12Resource* r, UINT sub, const D3D12_RANGE* range, void** out)
 {
@@ -484,7 +502,7 @@ ListState* Track(List* list)
     }
     return s;
 }
-void Created(void* object, ID3D12PipelineState* initial)
+void Created(void* object, ID3D12PipelineState* initial, ID3D12Device* device)
 {
     if (!object)
         return;
@@ -498,7 +516,8 @@ void Created(void* object, ID3D12PipelineState* initial)
     g_lists.Begin(real, initial);
     if (auto* s = g_lists.Find(real))
     {
-        s->incomplete = !complete;
+        s->device = TrackingDevice(device);
+        s->incomplete = !complete || !spatial_tracking::Available(s->device);
         BindPipeline(*s, initial);
     }
     list->Release();
@@ -510,7 +529,7 @@ HRESULT STDMETHODCALLTYPE hkCreateCommandList(ID3D12Device* d, UINT node, D3D12_
         return o_CreateCommandList(d, node, type, a, p, iid, out);
     const auto hr = o_CreateCommandList(d, node, type, a, p, iid, out);
     if (SUCCEEDED(hr) && out)
-        Created(*out, p);
+        Created(*out, p, d);
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hkCreateCommandList1(ID3D12Device4* d, UINT node, D3D12_COMMAND_LIST_TYPE type,
@@ -520,7 +539,7 @@ HRESULT STDMETHODCALLTYPE hkCreateCommandList1(ID3D12Device4* d, UINT node, D3D1
         return o_CreateCommandList1(d, node, type, flags, iid, out);
     const auto hr = o_CreateCommandList1(d, node, type, flags, iid, out);
     if (SUCCEEDED(hr) && out)
-        Created(*out, nullptr);
+        Created(*out, nullptr, d);
     return hr;
 }
 HRESULT STDMETHODCALLTYPE Reset(PFN_Reset original, List* l, ID3D12CommandAllocator* a, ID3D12PipelineState* p)
@@ -546,7 +565,13 @@ HRESULT STDMETHODCALLTYPE Reset(PFN_Reset original, List* l, ID3D12CommandAlloca
         g_lists.Begin(l, p);
         if (auto* state = g_lists.Find(l))
         {
-            state->incomplete = !complete;
+            if (!spatial_tracking::Available(state->device))
+            {
+                Microsoft::WRL::ComPtr<ID3D12Device> owner;
+                if (SUCCEEDED(l->GetDevice(IID_PPV_ARGS(&owner))))
+                    state->device = spatial_tracking::Find(owner.Get());
+            }
+            state->incomplete = !complete || !spatial_tracking::Available(state->device);
             BindPipeline(*state, p);
         }
         inlist::OnResetOrRelease(l);
@@ -658,7 +683,7 @@ bool Binding(const ListState& s, rootsig::Slot slot, bool compute, View* view)
     const auto mask = compute ? s.computeTableMask : s.graphicsTableMask;
     return (mask & (1ull << i)) && TableView(s, compute ? s.computeTables[i] : s.graphicsTables[i], slot.offset, view);
 }
-// A root signature not seen at creation (made before the hooks were installed, or a blob that did not deserialize)
+// Only an unknown old root signature may use this fallible fallback; failed parses stay refused.
 // has no layout to find the pass's bindings in; its EASU constants find them. They are the one block bound to the
 // pass (root constants, a root CBV, a CBV in a bound table) that decodes against the output; the input is then the one
 // texture in the bound tables of the decoded input size, and a dispatch's output the one UAV there the block decodes
@@ -667,8 +692,9 @@ bool Binding(const ListState& s, rootsig::Slot slot, bool compute, View* view)
 // leaves the binding unresolved; more than one refuses the pass.
 constexpr UINT kTableScan = 16; // descriptors looked at from the start of each bound table
 constinit std::atomic<bool> g_inferLogged {};
-int Infer(const ListState& s, bool compute, Facts& f)
+int TryInferLateBindings(const ListState& s, bool compute, Facts& f)
 {
+    s.device->rootAttempts.fetch_add(1, std::memory_order_relaxed);
     const auto* tables = compute ? s.computeTables : s.graphicsTables;
     const auto each = [&](auto&& fn)
     {
@@ -829,14 +855,14 @@ void ResolveViews(const ListState& s, const Pipeline* p, bool compute, Facts* fa
     if (compute)
         Binding(s, output, true, &f.output);
     else if (s.rtv0Valid)
-        descriptors::Lookup(s.rtv0, &f.output);
+        descriptors::Lookup(s.rtv0, &f.output, s.device);
     if (f.output.resource)
         f.outputDesc = f.output.resource->GetDesc();
 }
 bool Detect(List* list, ListState& s, Facts f)
 {
     auto* p = reinterpret_cast<Pipeline*>(s.user[1]);
-    if (!p || !Config::Instance()->ReplaceGameFsr1.value_or_default())
+    if (!p || !spatial_tracking::Available(s.device) || !Config::Instance()->ReplaceGameFsr1.value_or_default())
         return false;
     if (p->facts.shader.pass == Pass::Rcas)
     {
@@ -880,9 +906,11 @@ bool Detect(List* list, ListState& s, Facts f)
         return false;
     }
     int parameter = int(constants.parameter);
-    if (rs && !f.shader.uber && !rootsig::Layout(rs))
+    if (!f.shader.uber && rootsig::MayInfer(rs, s.device))
     {
-        parameter = Infer(s, compute, f);
+        parameter = TryInferLateBindings(s, compute, f);
+        (parameter >= 0 && f.input.resource && !f.ambiguous ? s.device->rootSuccess : s.device->rootFailure)
+            .fetch_add(1, std::memory_order_relaxed);
         if (!g_inferLogged.exchange(true))
             LOG_INFO("Spatial pass: root signature not seen at creation; bindings inferred from constants (root "
                      "signature {:X}: constants at root parameter {}, input {:X}{})",
@@ -1083,7 +1111,7 @@ template <class Handle> void CheckMotionVectors(const ListState& s, UINT count, 
     for (UINT i = 0; i < count; ++i)
     {
         descriptors::View view {};
-        if (!descriptors::Lookup(handle(i), &view) || !view.resource)
+        if (!descriptors::Lookup(handle(i), &view, s.device) || !view.resource)
             continue;
         const auto desc = view.resource->GetDesc();
         const auto format = view.format == DXGI_FORMAT_UNKNOWN ? desc.Format : view.format;
@@ -1275,10 +1303,11 @@ STATE(
         const D3D12_CPU_DESCRIPTOR_HANDLE* dsv)
     {
         OnOMSetRenderTargets(s, n, r, range, dsv);
+        const UINT rtvIncrement = descriptors::Increment(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, s.device);
         if (r)
-            CheckMotionVectors(s, n, [=](UINT i)
-                               { return range ? D3D12_CPU_DESCRIPTOR_HANDLE { r->ptr + SIZE_T(i) * g_rtvIncrement }
-                                              : r[i]; });
+            CheckMotionVectors(
+                s, n, [=](UINT i)
+                { return range ? D3D12_CPU_DESCRIPTOR_HANDLE { r->ptr + SIZE_T(i) * rtvIncrement } : r[i]; });
     });
 STATE(RSSetViewports, 21, +[](List*, ListState& s, UINT n, const D3D12_VIEWPORT* vp) { OnRSSetViewports(s, n, vp); });
 STATE(RSSetScissorRects, 22, +[](List*, ListState& s, UINT n, const D3D12_RECT* sc) { OnRSSetScissorRects(s, n, sc); });
@@ -1377,11 +1406,26 @@ void OnSessionEnter()
 }
 void Install(ID3D12Device* device)
 {
-    if (ThreadHasNoTls() || !device || Installed() || !Config::Instance()->ReplaceGameFsr1.value_or_default())
+    if (ThreadHasNoTls() || !device || !Config::Instance()->ReplaceGameFsr1.value_or_default())
         return;
     ID3D12Device* real = nullptr;
     if (!Util::CheckForRealObject(__FUNCTION__, device, reinterpret_cast<IUnknown**>(&real)))
         real = device;
+    auto* tracking = spatial_tracking::Observe(real);
+    if (!tracking)
+        return;
+    auto** deviceTable = *reinterpret_cast<void***>(real);
+    InstallClaim claim;
+    if (!claim.owned)
+        return; // No wait; a later ordinary install boundary may retry.
+    if (Installed())
+    {
+        bool sameCode = true;
+        for (size_t i = 0; i < std::size(kCreationSlots); ++i)
+            sameCode &= deviceTable[kCreationSlots[i]] == g_creationCode[i].load(std::memory_order_acquire);
+        tracking->ready.store(sameCode, std::memory_order_release);
+        return;
+    }
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
     Microsoft::WRL::ComPtr<List> list;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
@@ -1414,7 +1458,7 @@ void Install(ID3D12Device* device)
     auto** lt = *reinterpret_cast<void***>(realList);
     auto** bt = *reinterpret_cast<void***>(buffer.Get());
     g_hookCount = 0;
-    g_rtvIncrement = real->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
     g_tables.SetLog(+[](const char* why) { LOG_WARN("Spatial pass: {}", why); });
     g_tables.Install(lt);
 #define DEVICE(Name, Slot) DeviceHook(dt, Slot, o_##Name, hk##Name)
@@ -1521,6 +1565,9 @@ void Install(ID3D12Device* device)
         LOG_ERROR("Spatial pass: hooking failed ({:X}), not installed", UINT(result));
         return;
     }
+    for (size_t i = 0; i < std::size(kCreationSlots); ++i)
+        g_creationCode[i].store(deviceTable[kCreationSlots[i]], std::memory_order_release);
+    tracking->ready.store(true, std::memory_order_release);
     g_installed.store(true, std::memory_order_release);
     LOG_INFO("Spatial pass: watching for FSR1 upscale passes to replace with the upscaler (raster, compute, stream "
              "and library pipelines); buffers {} Release of their own",
@@ -1569,6 +1616,19 @@ static void EndFrame()
     maximum = (std::max) (maximum, easu);
     if (presents % 600)
         return;
+    for (auto& device : spatial_tracking::devices)
+        if (auto* object = device.object.load(std::memory_order_acquire);
+            object && object != reinterpret_cast<ID3D12Device*>(1))
+            LOG_INFO("Spatial tracking: device {:X}, generation {}; heap attempts {}, success {}, ignored {}, failure "
+                     "{}, queries {}; "
+                     "loose operations {}, writes {}, failure {}; root attempts {}, resolved {}, failure {}; "
+                     "unavailable {}/{}; active {} ready {}",
+                     size_t(object), device.generation, device.heapAttempts.exchange(0), device.heapSuccess.exchange(0),
+                     device.heapIgnored.exchange(0), device.heapFailure.exchange(0), device.heapQueries.exchange(0),
+                     device.looseOperations.exchange(0), device.looseWrites.exchange(0),
+                     device.looseFailure.exchange(0), device.rootAttempts.exchange(0), device.rootSuccess.exchange(0),
+                     device.rootFailure.exchange(0), device.descriptorFailed.load(), device.rootFailed.load(),
+                     device.active.load(), device.ready.load());
     const auto decoded = g_constants.exchange(0), fromTexture = g_textureRect.exchange(0);
     UINT lists = 0, mapped = 0;
     UINT64 mappedBytes = 0;

@@ -440,6 +440,14 @@ int Child(const std::string& shape, const std::string& scenario, const fs::path&
         if (!Ok(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)), "debug layer"))
             return 2;
         debug->EnableDebugLayer();
+        if (gbv)
+        {
+            ComPtr<ID3D12Debug1> debug1;
+            if (!Ok(debug.As(&debug1), "early GPU-based validation"))
+                return 2;
+            debug1->SetEnableGPUBasedValidation(TRUE);
+            std::puts("lateroot: GPU-based validation enabled before its early device");
+        }
         if (!Ok(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&early)), "early device"))
             return 2;
         g.late = true;
@@ -721,6 +729,25 @@ static int Parent(int argc, char** argv)
                     std::regex(R"(Spatial pass: [^;\n]*; replaced (\d+) upscale passes[^\n]*fallbacks: ([^;\n]*); )"
                                R"(depth from the game (\d+), neutral (\d+); backend ([^;\n]*);)"));
                 const long long replaced = found ? std::stoll(line[1].str()) : -1;
+                const std::regex tracking(
+                    R"(Spatial tracking: device [^;]+; heap attempts (\d+), success (\d+), ignored (\d+), failure (\d+), queries (\d+); loose operations (\d+), writes (\d+), failure (\d+); root attempts (\d+), resolved (\d+), failure (\d+);)");
+                uint64_t operations[11] {};
+                UINT summaries = 0;
+                for (auto i = std::sregex_iterator(log.begin(), log.end(), tracking); i != std::sregex_iterator(); ++i)
+                {
+                    ++summaries;
+                    for (UINT k = 0; k < std::size(operations); ++k)
+                        operations[k] += std::stoull((*i)[k + 1].str());
+                }
+                Check(summaries > 0, "actual fallback-helper counters at 600 presents");
+                if (scenario == "lateroot")
+                    Check(operations[0] > 0 && operations[4] > 0 && operations[5] > 0 && operations[8] >= 595 &&
+                              operations[9] >= 595,
+                          "old objects positively exercise bounded heap, loose and root fallback");
+                else if (scenario == "raster_cbv" || scenario == "compute_uber" || scenario == "compute_table" ||
+                         scenario == "privatevtable")
+                    Check(operations[0] == 0 && operations[4] == 0 && operations[5] == 0 && operations[8] == 0,
+                          "primary tracked path enters zero fallback helpers, including sampler heaps");
                 std::printf("      replaced %lld/600; fallbacks: %s; depth from the game %s, neutral %s; backend %s\n",
                             replaced, line[2].str().c_str(), line[3].str().c_str(), line[4].str().c_str(),
                             line[5].str().c_str());
