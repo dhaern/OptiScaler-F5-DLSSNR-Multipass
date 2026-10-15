@@ -544,6 +544,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoExposureMeterHighPercent.set_from_config(readFloat("DlssNr", "AutoExposureMeterHighPercent"));
             DlssNrNativeDepthFinder.set_from_config(readBool("DlssNr", "NativeDepthFinder"));
             DlssNrNativeDepthVkCopyUsage.set_from_config(readBool("DlssNr", "NativeDepthVkCopyUsage"));
+            DlssNrNativeDepthResolveInList.set_from_config(readBool("DlssNr", "NativeDepthResolveInList"));
             DlssNrNativeDxvkVulkan.set_from_config(readBool("DlssNr", "NativeDxvkVulkan"));
             DlssNrNativeDepthWarmupFrames.set_from_config(readUInt("DlssNr", "NativeDepthWarmupFrames"));
             DlssNrNativeDepthOverlay.set_from_config(readBool("DlssNr", "NativeDepthOverlay"));
@@ -1622,6 +1623,8 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrNativeDepthFinder.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthVkCopyUsage",
                  GetBoolValue(Instance()->DlssNrNativeDepthVkCopyUsage.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "NativeDepthResolveInList",
+                 GetBoolValue(Instance()->DlssNrNativeDepthResolveInList.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDxvkVulkan", GetBoolValue(Instance()->DlssNrNativeDxvkVulkan.value_for_config()).c_str());
     ini.SetValue("DlssNr", "NativeDepthWarmupFrames",
                  GetIntValue(Instance()->DlssNrNativeDepthWarmupFrames.value_for_config()).c_str());

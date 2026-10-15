@@ -66,6 +66,7 @@ struct SnapshotRequest
     uint64_t id = 0;
     bool readOnlyDepth = false;
     uint64_t stretchVertices = 0; // what the stretch being copied drew
+    bool reversed = false;        // the pick's depth direction when the copy was asked (decides a resolve's sample)
     const char* where = "";       // "clear", "close" or "unbind", for the log
 };
 

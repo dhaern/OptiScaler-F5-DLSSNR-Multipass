@@ -494,6 +494,9 @@
     <ClInclude Include="native\DepthResolveDx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="native\DepthSnapshotDx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="native\MsaaPictureDx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -4,6 +4,7 @@
 
 #include <native/DepthFinderCore.h>
 #include <native/DepthResolveDx12.h>
+#include <native/DepthSnapshotDx12.h>
 
 #include <Config.h>
 #include <Util.h>
@@ -109,10 +110,14 @@ struct Backup
     ID3D12Resource* readback = nullptr;                 // the same copy in CPU-readable memory, for the on-screen preview
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};    // where the first plane sits in it
     UINT64 readbackBytes = 0;                           // its size: the last row is not padded to RowPitch
-    // A multisampled buffer: the game's list copies it as it is into a multisampled slot of this format family and
-    // these samples, and the resolve (native/DepthResolveDx12) turns that into the R32 copy described above (typeless
-    // R32_TYPELESS, view R32_FLOAT), which is what everything else reads.
+    ID3D12Device* device = nullptr; // the device they were made on (not held): another needs its own
+    // A multisampled buffer. On a device that can resolve a region (DepthResolveSupported) and a buffer with quality 0
+    // or the standard pattern: the game's list resolves it to its nearest sample straight into a single-sample slot of
+    // the same format family (native/DepthSnapshotDx12.h), so the copies are read like a single-sample buffer's.
+    // Otherwise: the list copies it as it is into a multisampled slot of this family and these samples, and the resolve
+    // (native/DepthResolveDx12) turns that into the R32 copy described above (typeless R32_TYPELESS, view R32_FLOAT).
     DXGI_SAMPLE_DESC samples { 1, 0 };
+    bool resolveInList = false;
     DXGI_FORMAT multisampledTypeless = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT multisampledView = DXGI_FORMAT_UNKNOWN;
 };
@@ -133,6 +138,7 @@ struct SnapshotSlot
     ID3D12Resource* resource = nullptr;
     ID3D12Resource* multisampled = nullptr; // a multisampled buffer's copy as it is; `resource` is its resolve
     uint64_t vertices = 0;           // what the stretch it holds had drawn
+    bool reversed = false; // the pick's depth direction when it was taken (picks which sample a resolve keeps)
 };
 
 SnapshotSlot g_slots[kSnapshotSlots];
@@ -140,6 +146,8 @@ int g_slotsUsed = 0;                 // taken this frame
 GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 int g_bestSlots[kSnapshotSlots] = {}; // which slots g_best.copies are, in the same order
 uint64_t g_resolvedFrame = ~0ull;     // the g_best.frame whose multisampled copies were resolved
+ID3D12Device* g_resolveDevice = nullptr; // the device g_deviceResolves was asked of (not held)
+bool g_deviceResolves = false;          // programmable sample positions tier 1: may resolve in the game's list
 // Made once and never destroyed: at unload the device may already be gone, and its destructor waits on the GPU.
 native::DepthResolveDx12& Resolver()
 {
@@ -203,12 +211,31 @@ bool BackupFormats(DXGI_FORMAT depth, DXGI_FORMAT* typeless, DXGI_FORMAT* view)
 // frames (the menu or the motion step may still be reading them), and makes the preview's readback.
 bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_FORMAT typeless, DXGI_FORMAT view)
 {
-    // A multisampled buffer's copies are resolved into R32: that is the format of the copies read and of the readback.
+    // A multisampled buffer is resolved in the game's list into its own format family when the ini allows it, the
+    // device can, the format family is one that resolves right (native::DepthResolveFormat: not D24S8) and the pattern
+    // is quality 0 or the standard one (MIN/MAX does not depend on where the samples are). Any other is copied as it is
+    // and resolved into R32 afterwards: that is then the format of the copies read and of the readback.
     const bool multisampled = source.SampleDesc.Count > 1;
-    const DXGI_FORMAT multisampledTypeless = multisampled ? typeless : DXGI_FORMAT_UNKNOWN;
-    const DXGI_FORMAT multisampledView = multisampled ? view : DXGI_FORMAT_UNKNOWN;
 
-    if (multisampled)
+    if (multisampled && device != g_resolveDevice)
+    {
+        g_resolveDevice = device;
+        g_deviceResolves = native::DepthResolveSupported(device);
+        LOG_INFO("Depth finder: the device {} resolve multisampled depth in the game's lists{}",
+                 g_deviceResolves ? "may" : "may not",
+                 g_deviceResolves ? "" : " (no programmable sample positions tier 1)");
+    }
+
+    const bool standardPattern =
+        source.SampleDesc.Quality == 0 || source.SampleDesc.Quality == D3D12_STANDARD_MULTISAMPLE_PATTERN;
+    const bool resolveInList = multisampled && standardPattern && g_deviceResolves &&
+                               native::DepthResolveFormat(typeless) &&
+                               Config::Instance()->DlssNrNativeDepthResolveInList.value_or_default();
+    const bool resolveLater = multisampled && !resolveInList;
+    const DXGI_FORMAT multisampledTypeless = resolveLater ? typeless : DXGI_FORMAT_UNKNOWN;
+    const DXGI_FORMAT multisampledView = resolveLater ? view : DXGI_FORMAT_UNKNOWN;
+
+    if (resolveLater)
     {
         typeless = DXGI_FORMAT_R32_TYPELESS;
         view = DXGI_FORMAT_R32_FLOAT;
@@ -216,7 +243,8 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
 
     if (g_backup.width == source.Width && g_backup.height == source.Height && g_backup.typeless == typeless &&
         g_backup.samples.Count == source.SampleDesc.Count && g_backup.samples.Quality == source.SampleDesc.Quality &&
-        g_backup.multisampledTypeless == multisampledTypeless && g_backup.readback != nullptr)
+        g_backup.multisampledTypeless == multisampledTypeless && g_backup.resolveInList == resolveInList &&
+        g_backup.device == device && g_backup.readback != nullptr)
         return true;
 
     D3D12_RESOURCE_DESC desc {};
@@ -289,6 +317,8 @@ bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_
     g_resolvedFrame = ~0ull;
     g_backup = Backup { (uint32_t) source.Width, source.Height, typeless, view, readback, footprint, total };
     g_backup.samples = source.SampleDesc;
+    g_backup.device = device;
+    g_backup.resolveInList = resolveInList;
     g_backup.multisampledTypeless = multisampledTypeless;
     g_backup.multisampledView = multisampledView;
     return true;
@@ -320,9 +350,10 @@ SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
         desc.Format = g_backup.typeless;
         desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        const bool multisampled = g_backup.samples.Count > 1;
+        // Resolved in the game's list: a plain single-sample slot, like a single-sample buffer's.
+        const bool multisampled = g_backup.samples.Count > 1 && !g_backup.resolveInList;
 
-        // The resolve writes a multisampled buffer's copy into it.
+        // The compute resolve writes a multisampled buffer's copy into it.
         if (multisampled)
             desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
@@ -354,11 +385,12 @@ SnapshotSlot* TakeSlot(ID3D12Device* device, const D3D12_RESOURCE_DESC& source)
     return &slot;
 }
 
-// Under g_mutex, from a hook, before the clear itself or at the point the list leaves the buffer or closes: the buffer is in
-// the state its view says, so it goes to copy-source and back around one copy of its first subresource into a slot. A
-// multisampled buffer is skipped (it would need a resolve).
-void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth, const char* where = "",
-                    uint64_t stretchVertices = 0)
+// Under g_mutex, from a hook, before the clear itself or at the point the list leaves the buffer or closes: the buffer
+// is in the state its view says, so it goes to copy-source and back around one copy of its first subresource into a
+// slot. A multisampled buffer with a standard pattern goes to resolve-source instead, resolved to its nearest sample
+// straight into the slot; `reversed` (the pick's direction) says which sample is nearest.
+void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, bool readOnlyDepth, bool reversed,
+                    const char* where = "", uint64_t stretchVertices = 0)
 {
     // The first copies of a frame in a few frames, with what they were taken after.
     static uint64_t loggedFrames = 0, lastFrame = ~0ull;
@@ -398,7 +430,33 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
         return;
     }
 
-    SnapshotSlot* slot = EnsureBackup(device, desc, typeless, view) ? TakeSlot(device, desc) : nullptr;
+    if (!EnsureBackup(device, desc, typeless, view))
+    {
+        device->Release();
+        return;
+    }
+
+    // Resolved in the list: only a direct list can, and every list that binds a depth buffer is one. Checked before a
+    // slot is taken, so a skipped copy leaves no empty slot behind.
+    if (g_backup.resolveInList)
+    {
+        ID3D12GraphicsCommandList1* list1 = nullptr;
+        const bool canResolve = list->GetType() == D3D12_COMMAND_LIST_TYPE_DIRECT &&
+                                SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list1))) && list1 != nullptr;
+
+        if (list1 != nullptr)
+            list1->Release();
+
+        if (!canResolve)
+        {
+            device->Release();
+            SayOnce("resolveList", "a copy was asked on a list that cannot resolve (not a direct list, or no "
+                                   "ID3D12GraphicsCommandList1); it is skipped");
+            return;
+        }
+    }
+
+    SnapshotSlot* slot = TakeSlot(device, desc);
     device->Release();
 
     if (slot == nullptr)
@@ -413,17 +471,34 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
             std::format("first copy of the picked buffer taken: {}x{}, resource format {}, copied as {}{}", desc.Width,
                         desc.Height, (int) desc.Format, (int) typeless,
                         desc.SampleDesc.Count > 1
-                            ? std::format(" with its {} samples, resolved to the nearest", desc.SampleDesc.Count)
+                            ? std::format(" with its {} samples, resolved to the nearest {}", desc.SampleDesc.Count,
+                                          g_backup.resolveInList ? "in the game's list" : "afterwards")
                             : std::string()));
 
     slot->vertices = stretchVertices;
+    slot->reversed = reversed;
 
-    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    // Standard pattern: one resolve in the game's list straight into the slot, no multisampled copy and no extra pass.
+    if (g_backup.resolveInList)
+    {
+        if (const char* failed = native::RecordDepthResolve(list, source, depthState, slot->resource, kSlotRest,
+                                                            g_backup.view, reversed))
+        {
+            // Checked above, so not expected. Nothing was recorded and the slot (the last one taken) holds no depth of
+            // this frame: give it back so it is not read.
+            --g_slotsUsed;
+            SayOnce("resolveFailed", std::format("a copy could not be resolved in the game's list ({})", failed));
+        }
+
+        return;
+    }
+
+    auto barrier = [](ID3D12Resource* r, UINT subresource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
         D3D12_RESOURCE_BARRIER b {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.pResource = r;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.Subresource = subresource;
         b.Transition.StateBefore = before;
         b.Transition.StateAfter = after;
         return b;
@@ -435,8 +510,11 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     const D3D12_RESOURCE_STATES targetRest =
         slot->multisampled != nullptr ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : kSlotRest;
 
-    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                                     barrier(target, targetRest, D3D12_RESOURCE_STATE_COPY_DEST) };
+    // Only the source's depth plane (subresource 0) is copied, so only it changes state: the stencil plane may rest in
+    // another one (read-only depth with writable stencil). The target is ours and rests whole in targetRest.
+    constexpr UINT all = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, 0, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                     barrier(target, all, targetRest, D3D12_RESOURCE_STATE_COPY_DEST) };
     list->ResourceBarrier(2, in);
 
     D3D12_TEXTURE_COPY_LOCATION dst {};
@@ -451,8 +529,8 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
 
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
-    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
-                                      barrier(target, D3D12_RESOURCE_STATE_COPY_DEST, targetRest) };
+    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
+                                      barrier(target, all, D3D12_RESOURCE_STATE_COPY_DEST, targetRest) };
     list->ResourceBarrier(2, out);
 }
 
@@ -561,7 +639,7 @@ void TakeSnapshot(ID3D12GraphicsCommandList* list, const native::SnapshotRequest
         return;
 
     std::lock_guard lock(g_mutex);
-    RecordSnapshot(list, (ID3D12Resource*) (size_t) request.id, request.readOnlyDepth, request.where,
+    RecordSnapshot(list, (ID3D12Resource*) (size_t) request.id, request.readOnlyDepth, request.reversed, request.where,
                    request.stretchVertices);
 }
 
@@ -1074,14 +1152,25 @@ void OnPresent(IDXGISwapChain* swapChain)
             if (chosen < 0 || g_slots[i].vertices > g_slots[chosen].vertices)
                 chosen = i;
 
-        if (chosen >= 0 && g_slots[chosen].resource != nullptr && pick.valid)
+        // The slots were taken with the direction the pick had then; it changes only between frames, so a frame whose
+        // slots disagree straddled that change and is left without depth rather than read the wrong way.
+        bool sameDirection = true;
+
+        for (int i = 0; i < g_slotsUsed; ++i)
+            sameDirection = sameDirection && g_slots[i].reversed == g_slots[0].reversed;
+
+        if (!sameDirection)
+            SayOnce("direction",
+                    "a frame's copies were taken with different depth directions; that frame has no depth");
+
+        if (chosen >= 0 && g_slots[chosen].resource != nullptr && pick.valid && sameDirection)
         {
             g_best.valid = true;
             g_best.resource = g_slots[chosen].resource;
             g_best.viewFormat = g_backup.view;
             g_best.width = g_backup.width;
             g_best.height = g_backup.height;
-            g_best.reversed = pick.reversed;
+            g_best.reversed = g_slots[chosen].reversed;
             g_best.frame = presents;
 
             for (int i = 0; i < g_slotsUsed && i < GenericDepthDx12::Snapshot::kMaxCopies; ++i)
@@ -1133,7 +1222,8 @@ Snapshot ResolvedSnapshot(ID3D12CommandQueue* queue)
 {
     std::lock_guard lock(g_mutex);
 
-    if (!g_best.valid || g_backup.samples.Count <= 1 || g_resolvedFrame == g_best.frame)
+    // Single-sample, or already resolved in the game's lists: the slots are what is read
+    if (!g_best.valid || g_backup.samples.Count <= 1 || g_backup.resolveInList || g_resolvedFrame == g_best.frame)
         return g_best;
 
     native::DepthResolveDx12::Job jobs[native::DepthResolveDx12::kMaxJobs];
@@ -1177,7 +1267,7 @@ void RecordPreviewCopy(ID3D12GraphicsCommandList* list)
 
     // Only from the chosen copy of the frame just closed, and only when the menu is about to show it. A multisampled
     // buffer's copy holds something only once it has been resolved for this frame.
-    const bool unresolved = g_backup.samples.Count > 1 && g_resolvedFrame != g_best.frame;
+    const bool unresolved = g_backup.samples.Count > 1 && !g_backup.resolveInList && g_resolvedFrame != g_best.frame;
 
     if (!g_best.valid || unresolved || g_backup.readback == nullptr || g_best.width != g_backup.width ||
         g_best.height != g_backup.height)

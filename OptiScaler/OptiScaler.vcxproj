@@ -549,6 +549,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="native\SharedFrame.h" />
     <ClInclude Include="native\DepthCopyDx11.h" />
     <ClInclude Include="native\DepthResolveDx12.h" />
+    <ClInclude Include="native\DepthSnapshotDx12.h" />
     <ClInclude Include="native\MsaaPictureDx11.h" />
     <ClInclude Include="native\Dx11FrameSource.h" />
     <ClInclude Include="native\SharedFrameVk.h" />

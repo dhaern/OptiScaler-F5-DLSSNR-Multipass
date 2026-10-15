@@ -186,6 +186,7 @@ SnapshotRequest DepthFinderCore::OnDepthBound(uint64_t context, bool hadDepth, c
             request.id = previous->resource;
             request.readOnlyDepth = previous->readOnlyDepth;
             request.stretchVertices = previous->current.vertices;
+            request.reversed = _pick.reversed;
             request.where = "unbind";
         }
 
@@ -258,6 +259,7 @@ SnapshotRequest DepthFinderCore::OnDepthClear(uint64_t context, const DepthBuffe
             request.id = buffer.id;
             request.readOnlyDepth = false; // a clear needs depth-write
             request.stretchVertices = stretch.vertices;
+            request.reversed = _pick.reversed;
             request.where = "clear";
         }
     }
@@ -293,6 +295,7 @@ SnapshotRequest DepthFinderCore::OnContextEnd(uint64_t context)
             request.id = stats->resource;
             request.readOnlyDepth = stats->readOnlyDepth;
             request.stretchVertices = stats->current.vertices;
+            request.reversed = _pick.reversed;
             request.where = "close";
         }
 
@@ -326,6 +329,7 @@ SnapshotRequest DepthFinderCore::FlushForPresent(uint64_t context)
         request.id = stats->resource;
         request.readOnlyDepth = stats->readOnlyDepth;
         request.stretchVertices = stats->current.vertices;
+        request.reversed = _pick.reversed;
         request.where = "present";
         stats->current = DrawStats {};
     }
