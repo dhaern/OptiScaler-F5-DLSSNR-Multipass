@@ -146,6 +146,8 @@ int g_slotsUsed = 0;                 // taken this frame
 GenericDepthDx12::Snapshot g_best;   // the frame just closed's choice
 int g_bestSlots[kSnapshotSlots] = {}; // which slots g_best.copies are, in the same order
 uint64_t g_resolvedFrame = ~0ull;     // the g_best.frame whose multisampled copies were resolved
+ID3D12Device* g_resolveDevice = nullptr; // the device g_deviceResolves was asked of (not held)
+bool g_deviceResolves = false;          // programmable sample positions tier 1: may resolve in the game's list
 // Made once and never destroyed: at unload the device may already be gone, and its destructor waits on the GPU.
 native::DepthResolveDx12& Resolver()
 {
@@ -209,25 +211,26 @@ bool BackupFormats(DXGI_FORMAT depth, DXGI_FORMAT* typeless, DXGI_FORMAT* view)
 // frames (the menu or the motion step may still be reading them), and makes the preview's readback.
 bool EnsureBackup(ID3D12Device* device, const D3D12_RESOURCE_DESC& source, DXGI_FORMAT typeless, DXGI_FORMAT view)
 {
-    // A multisampled buffer is resolved in the game's list into its own format family when the device can and the
-    // pattern is quality 0 or the standard one (MIN/MAX does not depend on where the samples are). Any other is copied
-    // as it is and resolved into R32 afterwards: that is then the format of the copies read and of the readback.
-    static ID3D12Device* checkedDevice = nullptr;
-    static bool deviceResolves = false;
+    // A multisampled buffer is resolved in the game's list into its own format family when the ini allows it, the
+    // device can, the format family is one that resolves right (native::DepthResolveFormat: not D24S8) and the pattern
+    // is quality 0 or the standard one (MIN/MAX does not depend on where the samples are). Any other is copied as it is
+    // and resolved into R32 afterwards: that is then the format of the copies read and of the readback.
+    const bool multisampled = source.SampleDesc.Count > 1;
 
-    if (device != checkedDevice)
+    if (multisampled && device != g_resolveDevice)
     {
-        checkedDevice = device;
-        deviceResolves = native::DepthResolveSupported(device);
-        LOG_INFO("Depth finder: multisampled depth is {}",
-                 deviceResolves ? "resolved in the game's lists"
-                                : "copied and resolved afterwards (no programmable sample positions tier 1)");
+        g_resolveDevice = device;
+        g_deviceResolves = native::DepthResolveSupported(device);
+        LOG_INFO("Depth finder: the device {} resolve multisampled depth in the game's lists{}",
+                 g_deviceResolves ? "may" : "may not",
+                 g_deviceResolves ? "" : " (no programmable sample positions tier 1)");
     }
 
-    const bool multisampled = source.SampleDesc.Count > 1;
     const bool standardPattern =
         source.SampleDesc.Quality == 0 || source.SampleDesc.Quality == D3D12_STANDARD_MULTISAMPLE_PATTERN;
-    const bool resolveInList = multisampled && standardPattern && deviceResolves;
+    const bool resolveInList = multisampled && standardPattern && g_deviceResolves &&
+                               native::DepthResolveFormat(typeless) &&
+                               Config::Instance()->DlssNrNativeDepthResolveInList.value_or_default();
     const bool resolveLater = multisampled && !resolveInList;
     const DXGI_FORMAT multisampledTypeless = resolveLater ? typeless : DXGI_FORMAT_UNKNOWN;
     const DXGI_FORMAT multisampledView = resolveLater ? view : DXGI_FORMAT_UNKNOWN;
@@ -490,12 +493,12 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
         return;
     }
 
-    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    auto barrier = [](ID3D12Resource* r, UINT subresource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
         D3D12_RESOURCE_BARRIER b {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.pResource = r;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.Subresource = subresource;
         b.Transition.StateBefore = before;
         b.Transition.StateAfter = after;
         return b;
@@ -507,8 +510,11 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
     const D3D12_RESOURCE_STATES targetRest =
         slot->multisampled != nullptr ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : kSlotRest;
 
-    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                                     barrier(target, targetRest, D3D12_RESOURCE_STATE_COPY_DEST) };
+    // Only the source's depth plane (subresource 0) is copied, so only it changes state: the stencil plane may rest in
+    // another one (read-only depth with writable stencil). The target is ours and rests whole in targetRest.
+    constexpr UINT all = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, 0, depthState, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                                     barrier(target, all, targetRest, D3D12_RESOURCE_STATE_COPY_DEST) };
     list->ResourceBarrier(2, in);
 
     D3D12_TEXTURE_COPY_LOCATION dst {};
@@ -523,8 +529,8 @@ void RecordSnapshot(ID3D12GraphicsCommandList* list, ID3D12Resource* source, boo
 
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
-    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
-                                      barrier(target, D3D12_RESOURCE_STATE_COPY_DEST, targetRest) };
+    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, depthState),
+                                      barrier(target, all, D3D12_RESOURCE_STATE_COPY_DEST, targetRest) };
     list->ResourceBarrier(2, out);
 }
 

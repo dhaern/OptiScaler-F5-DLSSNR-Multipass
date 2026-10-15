@@ -29,6 +29,16 @@ inline bool DepthResolveSupported(ID3D12Device* device)
            options.ProgrammableSamplePositionsTier >= D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_1;
 }
 
+// Whether a buffer of this typeless family is resolved in the list. D24S8 (R24G8) is not: an RTX 5070 Ti (driver
+// 32.0.16.1714, tier 2) writes zeros for it with no debug-layer message, through the plane format and the DSV format
+// alike, and no format support bit says so (it reports no MULTISAMPLE_RESOLVE for R32_FLOAT_X8X24 either, which
+// resolves right). It keeps the copy and compute resolve.
+inline bool DepthResolveFormat(DXGI_FORMAT typeless)
+{
+    return typeless == DXGI_FORMAT_R32_TYPELESS || typeless == DXGI_FORMAT_R32G8X24_TYPELESS ||
+           typeless == DXGI_FORMAT_R16_TYPELESS;
+}
+
 // Records barriers to the resolve states, the resolve and barriers back into `list`. Nothing else is recorded: no
 // pipeline, root signature, heap or render target change. Returns nullptr when recorded, else why it was not.
 inline const char* RecordDepthResolve(ID3D12GraphicsCommandList* list, ID3D12Resource* source,
@@ -47,27 +57,30 @@ inline const char* RecordDepthResolve(ID3D12GraphicsCommandList* list, ID3D12Res
     if (FAILED(list->QueryInterface(IID_PPV_ARGS(&list1))) || list1 == nullptr)
         return "the command list has no ResolveSubresourceRegion (ID3D12GraphicsCommandList1)";
 
-    auto barrier = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    auto barrier = [](ID3D12Resource* r, UINT subresource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
         D3D12_RESOURCE_BARRIER b {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.pResource = r;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.Subresource = subresource;
         b.Transition.StateBefore = before;
         b.Transition.StateAfter = after;
         return b;
     };
 
-    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, sourceState, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
-                                     barrier(target, targetRest, D3D12_RESOURCE_STATE_RESOLVE_DEST) };
+    // Only the source's depth plane (subresource 0) is read: its stencil plane may rest in another state (a view with
+    // read-only depth and writable stencil), so it is left alone. The target is ours and rests whole in targetRest.
+    constexpr UINT all = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    D3D12_RESOURCE_BARRIER in[2] = { barrier(source, 0, sourceState, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
+                                     barrier(target, all, targetRest, D3D12_RESOURCE_STATE_RESOLVE_DEST) };
     list1->ResourceBarrier(2, in);
 
     // Nearest: the largest value with reversed Z, the smallest with standard Z (DepthResolve_Hlsl.h does the same)
     list1->ResolveSubresourceRegion(target, 0, 0, 0, source, 0, nullptr, view,
                                     reversed ? D3D12_RESOLVE_MODE_MAX : D3D12_RESOLVE_MODE_MIN);
 
-    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, sourceState),
-                                      barrier(target, D3D12_RESOURCE_STATE_RESOLVE_DEST, targetRest) };
+    D3D12_RESOURCE_BARRIER out[2] = { barrier(source, 0, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, sourceState),
+                                      barrier(target, all, D3D12_RESOURCE_STATE_RESOLVE_DEST, targetRest) };
     list1->ResourceBarrier(2, out);
 
     list1->Release();

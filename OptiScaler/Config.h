@@ -650,6 +650,11 @@ class Config
     // asks for that itself. Can cost a little depth compression on some GPUs. Off: Vulkan depth reads as not readable,
     // and Optical F5Low runs on motion only. Startup only (images are made once). See resource_tracking/GenericDepth_Vk.h.
     CustomOptional<bool> DlssNrNativeDepthVkCopyUsage { true };
+    // NativeDepthResolveInList: D3D12 only. With NativeDepthFinder on, a multisampled depth buffer is resolved inside
+    // the game's own command list (ResolveSubresourceRegion MIN/MAX) where the device and format allow it, instead of
+    // a full multisampled copy and a compute resolve afterwards. Off: always the copy and compute resolve, for a driver
+    // that resolves depth wrongly (flat depth in the finder's preview). See native/DepthSnapshotDx12.h.
+    CustomOptional<bool> DlssNrNativeDepthResolveInList { true };
     // NativeDxvkVulkan: experimental. A D3D11 game running on dxvk (doitsujin/dxvk: its D3D11 calls become Vulkan ones)
     // normally gets Optical F5Low's D3D11 driver (native/NativeDriverDx11.h), the same shared-texture bridge to a private
     // D3D12 device a real D3D11 game gets. On: that D3D11 driver stands aside, and the Vulkan driver (native/NativeDriverVk.h,

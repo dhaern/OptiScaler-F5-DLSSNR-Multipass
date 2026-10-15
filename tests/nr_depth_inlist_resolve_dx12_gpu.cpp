@@ -1,8 +1,9 @@
 // GPU test for native/DepthSnapshotDx12.h, the D3D12 depth finder's resolve of a multisampled depth buffer recorded
 // into the game's own command list (ResolveSubresourceRegion MIN/MAX into a single-sample slot), no game. A
 // multisampled depth buffer is cleared to 0.25 and a triangle at 0.75 is drawn over its upper-left half, so the pixels
-// along the diagonal hold both depths. For D32, D32S8, D24S8 and D16, with 2, 4 and 8 samples where the device has
-// them, quality 0 and the standard pattern, reversed and standard Z:
+// along the diagonal hold both depths. D24S8 is kept on the copy path (native::DepthResolveFormat says no: an RTX 5070
+// Ti resolves it to zeros), which the test checks. For D32, D32S8 and D16, with 2, 4 and 8 samples where the device
+// has them, quality 0 and the standard pattern, reversed and standard Z:
 //  - the slot, made as GenericDepth_Dx12 makes it (the buffer's typeless family, single-sample, resting readable) and
 //    read back the way the menu's preview reads it (footprint of subresource 0, decoded per family), equals pixel for
 //    pixel the compute resolve the finder used before (native/DepthResolveDx12, the reference),
@@ -429,6 +430,15 @@ void Matrix(Gpu& g)
 
     for (const auto& f : kFormats)
     {
+        if (!native::DepthResolveFormat(f.typeless))
+        {
+            char what[160];
+            std::snprintf(what, sizeof(what),
+                          "%s: DepthResolveFormat says no, so the finder keeps the copy and compute resolve", f.name);
+            Check(f.typeless == DXGI_FORMAT_R24G8_TYPELESS, what);
+            continue;
+        }
+
         for (UINT samples : { 2u, 4u, 8u })
         {
             if (!Supported(g, f.dsv, samples))
