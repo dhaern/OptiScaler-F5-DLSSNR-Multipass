@@ -120,7 +120,8 @@ Heap::Shadow* LooseSlot(SIZE_T cpu, bool create)
 Heap::Shadow* Slot(SIZE_T cpu, bool rtv, bool create)
 {
     if (Heap* h = FindCpu(cpu))
-        return (h->type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) == rtv ? &h->views[(cpu - h->cpu) / h->increment] : nullptr;
+        return h->views && (h->type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) == rtv
+                   ? &h->views[(cpu - h->cpu) / h->increment] : nullptr;
     return LooseSlot(cpu, create);
 }
 View Read(const Heap::Shadow& s)
@@ -334,10 +335,11 @@ View MakeView(Kind kind, ID3D12Resource* resource, const void* desc)
 
 void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC& desc, UINT increment)
 {
-    if (!object || !increment || !desc.NumDescriptors ||
-        (desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV))
+    if (!object || !increment || !desc.NumDescriptors || desc.Type >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES)
         return;
-    increments[desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
+    const bool tracked = desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (tracked)
+        increments[desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
     const SIZE_T cpu = object->GetCPUDescriptorHandleForHeapStart().ptr;
     const size_t bytes = size_t(desc.NumDescriptors) * increment;
     if (bytes / increment != desc.NumDescriptors || cpu > SIZE_MAX - bytes ||
@@ -350,9 +352,10 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
         return;
     }
     new (h) Heap {};
-    h->views = static_cast<Heap::Shadow*>(VirtualAlloc(nullptr, size_t(desc.NumDescriptors) * sizeof(Heap::Shadow),
-                                                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    if (!h->views)
+    if (tracked)
+        h->views = static_cast<Heap::Shadow*>(VirtualAlloc(nullptr, size_t(desc.NumDescriptors) * sizeof(Heap::Shadow),
+                                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (tracked && !h->views)
     {
         Retire(object, cpu, bytes);
         VirtualFree(h, 0, MEM_RELEASE);
@@ -395,7 +398,8 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
     ReleaseSRWLockExclusive(&creationLock);
     if (!next)
     {
-        VirtualFree(h->views, 0, MEM_RELEASE);
+        if (h->views)
+            VirtualFree(h->views, 0, MEM_RELEASE);
         VirtualFree(h, 0, MEM_RELEASE);
     }
 }
@@ -433,7 +437,7 @@ HeapRef Adopt(ID3D12DescriptorHeap* object)
     OnCreateHeap(object, desc, increment);
     ref = FindHeap(object);
     // What was written into it before, kept by CPU handle until now
-    if (auto* h = const_cast<Heap*>(ref.heap); h && looseTable.load(std::memory_order_acquire))
+    if (auto* h = const_cast<Heap*>(ref.heap); h && h->views && looseTable.load(std::memory_order_acquire))
         for (UINT i = 0; i < h->count; ++i)
             if (const Heap::Shadow* loose = LooseSlot(h->cpu + size_t(i) * h->increment, false))
                 Write(h->views[i], Read(*loose));
@@ -442,7 +446,7 @@ HeapRef Adopt(ID3D12DescriptorHeap* object)
 bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE cpu, View* out)
 {
     Heap* h = FindCpu(cpu.ptr);
-    const Heap::Shadow* s = h ? &h->views[(cpu.ptr - h->cpu) / h->increment] : LooseSlot(cpu.ptr, false);
+    const Heap::Shadow* s = h ? (h->views ? &h->views[(cpu.ptr - h->cpu) / h->increment] : nullptr) : LooseSlot(cpu.ptr, false);
     if (!s || !out)
         return false;
     *out = Read(*s);
@@ -451,7 +455,7 @@ bool Lookup(D3D12_CPU_DESCRIPTOR_HANDLE cpu, View* out)
 bool LookupGpu(const HeapRef& ref, D3D12_GPU_DESCRIPTOR_HANDLE gpu, View* out)
 {
     const Heap* h = ref.heap;
-    if (!h || !out || !h->gpu || !h->active.load(std::memory_order_relaxed) || gpu.ptr < h->gpu ||
+    if (!h || !h->views || !out || !h->gpu || !h->active.load(std::memory_order_relaxed) || gpu.ptr < h->gpu ||
         gpu.ptr - h->gpu >= UINT64(h->count) * h->increment || (gpu.ptr - h->gpu) % h->increment)
         return false;
     *out = Read(h->views[(gpu.ptr - h->gpu) / h->increment]);

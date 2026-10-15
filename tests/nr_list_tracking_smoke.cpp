@@ -20,6 +20,7 @@ template <class T> static T* Pointer(uintptr_t value) { return reinterpret_cast<
 
 struct FakeHeap final : ID3D12DescriptorHeap
 {
+    UINT descCalls = 0, deviceCalls = 0;
     D3D12_DESCRIPTOR_HEAP_DESC desc {};
     SIZE_T cpu;
     UINT64 gpu;
@@ -37,8 +38,8 @@ struct FakeHeap final : ID3D12DescriptorHeap
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void**) override { return E_NOTIMPL; }
-    D3D12_DESCRIPTOR_HEAP_DESC STDMETHODCALLTYPE GetDesc() override { return desc; }
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void**) override { ++deviceCalls; return E_NOTIMPL; }
+    D3D12_DESCRIPTOR_HEAP_DESC STDMETHODCALLTYPE GetDesc() override { ++descCalls; return desc; }
     D3D12_CPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetCPUDescriptorHandleForHeapStart() override { return { cpu }; }
     D3D12_GPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetGPUDescriptorHandleForHeapStart() override { return { gpu }; }
 };
@@ -184,6 +185,11 @@ static void Lists()
 static void Descriptors()
 {
     using namespace native::descriptors;
+    FakeHeap sampler(0x400000, 0xb00000, 16, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    OnCreateHeap(&sampler, sampler.desc, 16);
+    for (UINT i = 0; i < 128; ++i)
+        Check(FindHeap(&sampler).heap != nullptr, "ignored sampler is known metadata");
+    Check(sampler.descCalls == 0 && sampler.deviceCalls == 0, "known sampler needs no late object queries");
     FakeHeap cpu(0x100000, 0, 16), gpu(0x200000, 0x900000, 16), rtv(0x300000, 0, 16, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     OnCreateHeap(&cpu, cpu.desc, 32);
     OnCreateHeap(&gpu, gpu.desc, 32);
