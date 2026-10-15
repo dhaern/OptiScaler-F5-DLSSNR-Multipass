@@ -107,8 +107,10 @@ int main()
         { Refusal::InputState, +[](Facts& f) { f.inputStateKnown = false; } },
         { Refusal::EnhancedBarriers, +[](Facts& f) { f.enhanced = true; } },
         { Refusal::AfterBundle, +[](Facts& f) { f.afterBundle = true; } },
+        { Refusal::RenderPass, +[](Facts& f) { f.inRenderPass = true; } },
         { Refusal::OutputUnresolved, +[](Facts& f) { f.output.resource = nullptr; } },
         { Refusal::Bindless, +[](Facts& f) { f.bindless = true; } },
+        { Refusal::Ambiguous, +[](Facts& f) { f.ambiguous = true; } },
         { Refusal::RectUnknown,
           +[](Facts& f)
           {
