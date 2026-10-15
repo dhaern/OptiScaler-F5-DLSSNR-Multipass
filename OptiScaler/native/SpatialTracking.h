@@ -13,7 +13,7 @@ struct Device
 {
     std::atomic<ID3D12Device*> object {};
     uint64_t generation = 0;
-    std::atomic<bool> active { true }, ready { false }, descriptorFailed {}, rootFailed {};
+    std::atomic<bool> published {}, active { true }, ready { false }, descriptorFailed {}, rootFailed {};
     std::atomic<UINT> increments[2] {};
     std::atomic<void*> loose {};
     std::atomic<uint64_t> heapAttempts {}, heapQueries {}, heapSuccess {}, heapIgnored {}, heapFailure {},
@@ -23,7 +23,8 @@ inline constinit Device devices[64] {};
 inline Device* Find(ID3D12Device* object)
 {
     for (auto& d : devices)
-        if (object && d.object.load(std::memory_order_acquire) == object && d.active.load(std::memory_order_acquire))
+        if (object && d.object.load(std::memory_order_acquire) == object &&
+            d.published.load(std::memory_order_acquire) && d.active.load(std::memory_order_acquire))
             return &d;
     return nullptr;
 }
@@ -74,8 +75,13 @@ inline Device* Observe(ID3D12Device* object)
     {
         auto& d = devices[i];
         ID3D12Device* empty = nullptr;
-        if (!d.object.compare_exchange_strong(empty, reinterpret_cast<ID3D12Device*>(1), std::memory_order_acq_rel))
+        // Reserve the identity itself: another observer must stop at this slot, not attach a second cookie.
+        if (!d.object.compare_exchange_strong(empty, object, std::memory_order_acq_rel))
+        {
+            if (empty == object && d.active.load(std::memory_order_acquire))
+                return Find(object); // Published generation or safe nonblocking fallback while its owner finishes.
             continue;
+        }
         d.generation = i + 1;
         d.increments[0].store(object->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
         d.increments[1].store(object->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV));
@@ -85,7 +91,7 @@ inline Device* Observe(ID3D12Device* object)
             cookie->Release();
         if (!attached)
             d.active.store(false, std::memory_order_release);
-        d.object.store(object, std::memory_order_release);
+        d.published.store(true, std::memory_order_release);
         return attached ? &d : nullptr;
     }
     return nullptr;

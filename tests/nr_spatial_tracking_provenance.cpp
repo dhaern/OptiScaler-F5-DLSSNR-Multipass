@@ -5,6 +5,10 @@
 #include "../OptiScaler/native/RootSignatureMap.h"
 #include "../OptiScaler/native/ListStateDx12.h"
 #include <cstdio>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <array>
 #if __has_include("../OptiScaler/native/SpatialTracking.h")
 #include "../OptiScaler/native/SpatialTracking.h"
 using Context = native::spatial_tracking::Device;
@@ -91,6 +95,92 @@ static bool Lookup(Context* c, SIZE_T cpu, native::descriptors::View* out)
     return native::descriptors::Lookup({ cpu }, out);
 #endif
 }
+#ifdef SCOPED_TRACKING
+// COM-shaped device seam: exactly the two methods Observe uses, with normal private-interface ownership.
+struct ObservedDevice
+{
+    void** table;
+    IUnknown* cookie = nullptr;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool pause = false, entered = false, resume = false, failAttach = false;
+    unsigned attachments = 0;
+    static UINT STDMETHODCALLTYPE Stride(ObservedDevice* d, D3D12_DESCRIPTOR_HEAP_TYPE)
+    {
+        std::unique_lock lock(d->mutex);
+        if (d->pause && !d->entered)
+        {
+            d->entered = true;
+            d->changed.notify_all();
+            d->changed.wait(lock, [&] { return d->resume; });
+        }
+        return 32;
+    }
+    static HRESULT STDMETHODCALLTYPE Attach(ObservedDevice* d, REFGUID, const IUnknown* value)
+    {
+        std::lock_guard lock(d->mutex);
+        if (d->failAttach)
+            return E_FAIL;
+        auto* next = const_cast<IUnknown*>(value);
+        if (next) next->AddRef();
+        if (d->cookie) d->cookie->Release();
+        d->cookie = next;
+        ++d->attachments;
+        return S_OK;
+    }
+    ID3D12Device* Object() { return reinterpret_cast<ID3D12Device*>(this); }
+    void Retire() { if (cookie) { cookie->Release(); cookie = nullptr; } }
+    ~ObservedDevice() { Retire(); }
+};
+static void ObserveRace()
+{
+    namespace tracking = native::spatial_tracking;
+    std::array<void*,44> table {};
+    table[5] = reinterpret_cast<void*>(ObservedDevice::Attach);
+    table[15] = reinterpret_cast<void*>(ObservedDevice::Stride);
+    ObservedDevice object { table.data() };
+    object.pause = true;
+    Context* first = nullptr;
+    std::thread owner([&] { first = tracking::Observe(object.Object()); });
+    { std::unique_lock lock(object.mutex); object.changed.wait(lock, [&] { return object.entered; }); }
+    Context* second = tracking::Observe(object.Object()); // Must return without waiting for the paused owner.
+    native::ListState list;
+    Heap heap;
+    auto publish = [&](Context* d) {
+        if (!d) return;
+        d->ready.store(true);
+        list.device = d;
+        Created(d,heap,32);
+        Cbv(d,heap.cpu,0xabcdef00);
+    };
+    publish(second); // Frozen code publishes metadata for the duplicate before the owner replaces its cookie.
+    { std::lock_guard lock(object.mutex); object.resume = true; object.changed.notify_all(); }
+    owner.join();
+    if (!second) publish(first);
+    native::descriptors::View view;
+    Check(first && (!second || first == second), "simultaneous first observation never publishes two generations");
+    Check(object.attachments == 1, "one lifetime cookie attached per live object");
+    Check(tracking::Available(list.device) && Lookup(list.device,heap.cpu,&view) && view.va == 0xabcdef00,
+          "creation/list metadata survives the concurrent observer");
+    Check(tracking::Observe(object.Object()) == list.device, "retry finds the published canonical generation");
+    const auto old = list.device;
+    object.Retire();
+    Check(!tracking::Available(old) && !tracking::Find(object.Object()), "marker release retires the old generation");
+    auto* reused = tracking::Observe(object.Object());
+    Check(reused && reused != old && reused->generation != old->generation, "same address obtains a fresh generation");
+    ObservedDevice independent { table.data() };
+    auto* other = tracking::Observe(independent.Object());
+    Check(other && other != reused, "independent device keeps independent metadata");
+    ObservedDevice failed { table.data() }; failed.failAttach = true;
+    Check(!tracking::Observe(failed.Object()) && !tracking::Find(failed.Object()), "failed cookie attachment is not published live");
+    std::array<ObservedDevice,65> churn {};
+    unsigned accepted = 0;
+    for (auto& d : churn) { d.table=table.data(); if (tracking::Observe(d.Object())) ++accepted; }
+    Check(accepted > 0 && accepted < churn.size(), "device table exhausts without recycling old generations");
+    Check(tracking::Find(object.Object()) == reused && tracking::Find(independent.Object()) == other,
+          "table exhaustion preserves existing independent identities");
+}
+#endif
 int main()
 {
     Context a {}, b {};
@@ -175,6 +265,7 @@ int main()
     Check(!b.active.load() && !Lookup(&b, two.cpu, &v), "device lifetime cookie retires its generation");
     a.active.store(false);
     Check(!Lookup(&a, one.cpu, &v), "retired device generation cannot expose stale views");
+    ObserveRace();
 #endif
     std::printf("%s: scoped tracking (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
