@@ -40,7 +40,8 @@ template<class... Args> const char* CountDepthResolve(Args... args) {
 struct Config
 {
     struct Value { unsigned value; unsigned value_or_default() const { return value; } };
-    Value DlssNrNativeMotion { 1 }, DlssNrNativeDepthWarmupFrames { 0 }, ReplaceGameFsr1 { 0 };
+    Value DlssNrNativeMotion { 1 }, DlssNrNativeDepthWarmupFrames { 0 }, ReplaceGameFsr1 { 0 },
+          DlssNrNativeDepthResolveInList { 1 };
     static Config* Instance();
 };
 inline Config depthConfig;

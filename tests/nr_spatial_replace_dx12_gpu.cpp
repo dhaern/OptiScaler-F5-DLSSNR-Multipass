@@ -761,8 +761,11 @@ static int Parent(int argc, char** argv)
                 const Compare cmp = CompareFrames(frame, reference, half, width, height, outW, outH);
                 std::printf("      region off EASU's %.1f%%, error against the pattern %.4f (EASU %.4f)\n",
                             cmp.regionDiffers * 100.0, cmp.maePattern, cmp.maeReference);
+                const bool steady = scenario == "raster_cbv" || scenario == "lateroot" ||
+                                    scenario == "compute_uber" || scenario == "compute_table" ||
+                                    scenario == "privatevtable";
                 const long long least = scenario == "device" || scenario == "backendchange" ? 580
-                                        : scenario == "lateroot"                            ? 595
+                                        : steady                                            ? 595
                                                                                             : 590;
                 Check(replaced >= least, "at least " + std::to_string(least) + " of 600 upscale passes replaced");
                 Check(cmp.regionDiffers > 0.25, "the region is the upscaler's, not EASU's");

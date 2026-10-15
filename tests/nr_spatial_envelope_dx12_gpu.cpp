@@ -50,7 +50,7 @@ struct Scene
 ComPtr<ID3D12RootSignature> Signature(ID3D12Device* device, bool compute, bool ours)
 {
     const D3D12_DESCRIPTOR_RANGE ranges[2] { { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 },
-                                             { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1 } };
+                                             { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, ours ? 0u : 1u } };
     D3D12_ROOT_PARAMETER params[2] {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].DescriptorTable = { ours ? 1u : compute ? 2u : 1u, ours ? ranges + 1 : ranges };
