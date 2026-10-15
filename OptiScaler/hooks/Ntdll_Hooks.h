@@ -27,6 +27,8 @@ class NtdllHooks
         if (ThreadHasNoTls())
             return o_RtlGetVersion(lpVersionInformation);
 
+        LibraryLoadHooks::CatchUpDeferredLoads();
+
         if (lpVersionInformation == nullptr)
             return STATUS_INVALID_PARAMETER;
 
@@ -48,7 +50,14 @@ class NtdllHooks
                                        PHANDLE ModuleHandle)
     {
         if (ThreadHasNoTls())
-            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        {
+            auto result = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+            if (NT_SUCCESS(result) && ModuleHandle != nullptr)
+                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle));
+            return result;
+        }
+
+        LibraryLoadHooks::CatchUpDeferredLoads();
 
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
@@ -105,7 +114,14 @@ class NtdllHooks
                                       PHANDLE ModuleHandle)
     {
         if (ThreadHasNoTls())
-            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        {
+            auto result = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+            if (NT_SUCCESS(result) && ModuleHandle != nullptr)
+                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle));
+            return result;
+        }
+
+        LibraryLoadHooks::CatchUpDeferredLoads();
 
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
@@ -175,6 +191,8 @@ class NtdllHooks
 
             return o_LdrUnloadDll(lpLibrary);
         }
+
+        LibraryLoadHooks::CatchUpDeferredLoads();
 
         if (lpLibrary == nullptr)
             return STATUS_INVALID_PARAMETER;

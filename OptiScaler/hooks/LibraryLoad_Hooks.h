@@ -1,13 +1,24 @@
 #pragma once
 #include "SysUtils.h"
+#include <misc/DeferredModuleScan.h>
 
 class LibraryLoadHooks
 {
   private:
+    inline static constinit DeferredModuleScan _deferredScan;
+    static HMODULE HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE loadedModule);
+    static void ScanLoadedModules();
     static void CheckModulesInMemory();
     static bool StartsWithInsensitive(std::wstring_view str, std::wstring_view prefix);
 
   public:
+    static void RecordDeferredLoad(HMODULE module)
+    {
+        if (module != nullptr)
+            _deferredScan.Mark();
+    }
+    static void CatchUpDeferredLoads();
+
     static HMODULE LoadLibraryCheckA(std::string libName, LPCSTR lpLibFullPath);
     static HMODULE LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath);
     static std::optional<NTSTATUS> FreeLibrary(PVOID library);

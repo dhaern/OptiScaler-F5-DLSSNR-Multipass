@@ -836,7 +836,7 @@ void HookFSR3Inputs(HMODULE module)
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
 
-        if (o_ffxFSR3GetInterfaceDX12 == nullptr)
+        if (o_ffxFsr3UpscalerContextCreate_Dx12 == nullptr)
         {
             o_ffxFsr3UpscalerContextCreate_Dx12 = (PFN_ffxFsr3UpscalerContextCreate) KernelBaseProxy::GetProcAddress_()(
                 module, "ffxFsr3UpscalerContextCreate");

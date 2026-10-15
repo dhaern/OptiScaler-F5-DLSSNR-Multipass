@@ -105,6 +105,8 @@ FARPROC WINAPI KernelHooks::hk_K32_GetProcAddress(HMODULE hModule, LPCSTR lpProc
         return o_K32_GetProcAddress(hModule, lpProcName);
     }
 
+    LibraryLoadHooks::CatchUpDeferredLoads();
+
     if ((size_t) lpProcName < 0x000000000000F000)
     {
         if (hModule == dllModule)
@@ -143,6 +145,8 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleA(LPCSTR lpModuleName)
 {
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleA(lpModuleName);
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpModuleName != NULL)
     {
@@ -184,6 +188,8 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleW(LPCWSTR lpModuleName)
 {
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleW(lpModuleName);
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpModuleName != NULL)
     {
@@ -276,6 +282,8 @@ BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModul
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleExA(dwFlags, lpModuleName, phModule);
 
+    LibraryLoadHooks::CatchUpDeferredLoads();
+
     // Flags first: with GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS lpModuleName is an address, not a name to compare
     if (dwFlags == 0 && lpModuleName && IsXellName(lpModuleName))
     {
@@ -293,6 +301,8 @@ BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModu
 {
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleExW(dwFlags, lpModuleName, phModule);
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpModuleName && dwFlags == GET_MODULE_HANDLE_EX_FLAG_PIN && lstrcmpW(L"nvapi64.dll", lpModuleName) == 0 &&
         phModule)
@@ -319,6 +329,8 @@ FARPROC WINAPI KernelHooks::hk_KB_GetProcAddress(HMODULE hModule, LPCSTR lpProcN
 {
     if (ThreadHasNoTls())
         return o_KB_GetProcAddress(hModule, lpProcName);
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if ((size_t) lpProcName < 0x000000000000F000)
     {
@@ -401,7 +413,8 @@ HANDLE WINAPI KernelHooks::hk_K32_CreateFileW(LPCWSTR lpFileName, DWORD dwDesire
 }
 
 VALIDATE_HOOK(hk_K32_SetUnhandledExceptionFilter, Kernel32Proxy::PFN_SetUnhandledExceptionFilter)
-LPTOP_LEVEL_EXCEPTION_FILTER WINAPI KernelHooks::hk_K32_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER lpFilter)
+LPTOP_LEVEL_EXCEPTION_FILTER WINAPI
+KernelHooks::hk_K32_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER lpFilter)
 {
     // Logger.cpp keeps its own filter on top and calls the game's after it (the real API is only reached from there)
     return CrashFilterFromGame(lpFilter, o_K32_SetUnhandledExceptionFilter);
@@ -418,8 +431,8 @@ VOID WINAPI KernelHooks::hk_K32_ExitProcess(UINT uExitCode)
         return;
     }
 
-    // Other threads (the log's writer) are stopped by ExitProcess and the loader's detach is skipped for it: this is the
-    // last chance for the queued log lines to reach the disk. Bounded.
+    // Other threads (the log's writer) are stopped by ExitProcess and the loader's detach is skipped for it: this is
+    // the last chance for the queued log lines to reach the disk. Bounded.
     DrainLogForExit();
     o_K32_ExitProcess(uExitCode);
 }
@@ -466,7 +479,13 @@ VALIDATE_HOOK(hk_K32_LoadLibraryW, Kernel32Proxy::PFN_LoadLibraryW)
 HMODULE KernelHooks::hk_K32_LoadLibraryW(LPCWSTR lpLibFileName)
 {
     if (ThreadHasNoTls())
-        return o_K32_LoadLibraryW(lpLibFileName);
+    {
+        auto module = o_K32_LoadLibraryW(lpLibFileName);
+        LibraryLoadHooks::RecordDeferredLoad(module);
+        return module;
+    }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibFileName == nullptr)
         return NULL;
@@ -489,7 +508,13 @@ VALIDATE_HOOK(hk_K32_LoadLibraryA, Kernel32Proxy::PFN_LoadLibraryA)
 HMODULE KernelHooks::hk_K32_LoadLibraryA(LPCSTR lpLibFileName)
 {
     if (ThreadHasNoTls())
-        return o_K32_LoadLibraryA(lpLibFileName);
+    {
+        auto module = o_K32_LoadLibraryA(lpLibFileName);
+        LibraryLoadHooks::RecordDeferredLoad(module);
+        return module;
+    }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibFileName == nullptr)
         return NULL;
@@ -513,7 +538,13 @@ VALIDATE_HOOK(hk_K32_LoadLibraryExW, Kernel32Proxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_K32_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     if (ThreadHasNoTls())
-        return o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    {
+        auto module = o_K32_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+        LibraryLoadHooks::RecordDeferredLoad(module);
+        return module;
+    }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibFileName == nullptr)
         return NULL;
@@ -536,7 +567,13 @@ VALIDATE_HOOK(hk_K32_LoadLibraryExA, Kernel32Proxy::PFN_LoadLibraryExA)
 HMODULE KernelHooks::hk_K32_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     if (ThreadHasNoTls())
-        return o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+    {
+        auto module = o_K32_LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+        LibraryLoadHooks::RecordDeferredLoad(module);
+        return module;
+    }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibFileName == nullptr)
         return NULL;
@@ -560,7 +597,13 @@ VALIDATE_HOOK(hk_KB_LoadLibraryExW, KernelBaseProxy::PFN_LoadLibraryExW)
 HMODULE KernelHooks::hk_KB_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
     if (ThreadHasNoTls())
-        return o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    {
+        auto module = o_KB_LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+        LibraryLoadHooks::RecordDeferredLoad(module);
+        return module;
+    }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibFileName == nullptr)
         return NULL;
@@ -591,6 +634,8 @@ BOOL KernelHooks::hk_K32_FreeLibrary(HMODULE lpLibrary)
 
         return o_K32_FreeLibrary(lpLibrary);
     }
+
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     if (lpLibrary == nullptr)
         return STATUS_INVALID_PARAMETER;
