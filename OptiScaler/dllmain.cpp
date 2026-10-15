@@ -785,7 +785,11 @@ static void CheckWorkingMode()
                 dllNamesW.push_back(L"d3d12.dll");
                 dllNamesW.push_back(L"d3d12");
 
-                D3d12Proxy::Init(originalModule);
+                if (!D3d12Proxy::Init(originalModule))
+                {
+                    LOG_ERROR("Original d3d12.dll binding is unavailable");
+                    break;
+                }
                 d3d12.LoadOriginalLibrary(originalModule);
 
                 State::Instance().workingMode = WorkingMode::D3d12;
@@ -881,8 +885,8 @@ static void CheckWorkingMode()
         if (Config::Instance()->OverlayMenu.value_or_default() && d3d12Module != nullptr)
         {
             LOG_DEBUG("d3d12.dll already in memory");
-            D3d12Proxy::Init(d3d12Module);
-            D3D12Hooks::Hook();
+            if (!D3d12Proxy::Init(d3d12Module) || !D3D12Hooks::Hook())
+                LibraryLoadHooks::RecordDeferredLoad(d3d12Module);
         }
     }
     else
@@ -894,8 +898,8 @@ static void CheckWorkingMode()
     if (D3d12Proxy::Module() == nullptr && State::Instance().gameQuirks & GameQuirk::LoadD3D12Manually)
     {
         LOG_DEBUG("Loading d3d12.dll manually");
-        D3d12Proxy::Init();
-        D3D12Hooks::Hook();
+        if (!D3d12Proxy::Init() || !D3D12Hooks::Hook())
+            LibraryLoadHooks::RecordDeferredLoad(D3d12Proxy::Module());
     }
 
     d3d12AgilityModule = GetDllNameWModule(&dx12agilityNamesW);

@@ -317,6 +317,12 @@ void IdentifyGpu::getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InA
     if (InFactory->QueryInterface(IID_PPV_ARGS(&factory6)) == S_OK && factory6 != nullptr)
     {
         D3d12Proxy::Init();
+        const auto createDevice = D3d12Proxy::D3D12CreateDevice_();
+        if (createDevice == nullptr)
+        {
+            factory6->Release();
+            return; // A concurrent initializer may still be publishing exports; a later call can retry.
+        }
 
         for (auto gpu : allGpus)
         {
@@ -325,14 +331,13 @@ void IdentifyGpu::getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InA
                 LOG_TRACE("Trying to select: {}", gpu.name);
 
                 ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
-                auto result = factory6->EnumAdapterByLuid(gpu.luid, IID_PPV_ARGS(InAdapter));
+                factory6->EnumAdapterByLuid(gpu.luid, IID_PPV_ARGS(InAdapter));
             }
 
             if (*InAdapter != nullptr)
             {
                 // Check if the requested D3D_FEATURE_LEVEL is supported without actually creating the device
-                if (SUCCEEDED(D3d12Proxy::D3D12CreateDevice_()(*InAdapter, requiredFeatureLevel, _uuidof(ID3D12Device),
-                                                               nullptr)))
+                if (SUCCEEDED(createDevice(*InAdapter, requiredFeatureLevel, _uuidof(ID3D12Device), nullptr)))
                 {
                     break;
                 }
@@ -385,7 +390,13 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     if (!d3d12Module)
         return;
 
-    D3d12Proxy::Init(d3d12Module);
+    if (o_D3D12CreateDevice == nullptr)
+    {
+        D3d12Proxy::Init(d3d12Module);
+        o_D3D12CreateDevice = D3d12Proxy::D3D12CreateDevice_();
+    }
+    if (o_D3D12CreateDevice == nullptr)
+        return; // Do not mark pending/failed binding as completed capability work.
 
     {
         std::scoped_lock lock(mutex);
@@ -427,17 +438,12 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
         ComPtr<IDXGIAdapter> adapter;
         if (SUCCEEDED(factory->EnumAdapterByLuid(gpuInfo.luid, IID_PPV_ARGS(&adapter))))
         {
-            D3d12Proxy::PFN_D3D12CreateDevice pD3D12CreateDevice = nullptr;
-            if (o_D3D12CreateDevice)
-                pD3D12CreateDevice = o_D3D12CreateDevice;
-            else
-                pD3D12CreateDevice = D3d12Proxy::D3D12CreateDevice_();
 
             // D3D12 device is needed to be able to query amdxc and check for vkd3d-proton
             ScopedCreatingD3DDevice scopedCreating {};
             ScopedSkipVulkanHooks skipVulkanHooks {};
             ComPtr<ID3D12Device> localDevice;
-            auto createResult = pD3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&localDevice));
+            auto createResult = o_D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&localDevice));
 
             if (SUCCEEDED(createResult) && localDevice)
             {
