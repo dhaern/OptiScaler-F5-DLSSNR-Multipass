@@ -1798,6 +1798,7 @@ DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
     // This existing worker runs after DLL_PROCESS_ATTACH has returned. GPU
     // enumeration and loading another graphics proxy must not run in DllMain.
     AmpereMfgLoader::TrySetup();
+    LibraryLoadHooks::CatchUpDeferredLoads();
 
     return 0;
 }

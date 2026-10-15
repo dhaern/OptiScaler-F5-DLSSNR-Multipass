@@ -34,7 +34,7 @@
 #include <misc/IdentifyGpu.h>
 #include <low_latency/input/input_uell.h>
 
-#include <tlhelp32.h>
+
 
 // #define LOG_LIB_OPERATIONS
 
@@ -53,7 +53,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
 HMODULE LibraryLoadHooks::HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE loadedModule,
                                             bool* ownLoadFailed)
 {
-    // A catch-up can initialize and hook an existing image, but cannot replace handles already given to the caller.
+    if (KnownNonExecutable(KernelBaseProxy::GetModuleHandleW_()(lpLibFullPath)))
+        return nullptr;
+    loader_boundary::OriginalOnlyScope internalWork;
     const bool alreadyLoaded = loadedModule != nullptr;
 
     // This load doesn't always resolve to the file the caller's own load gets: an older same-named runtime next to
@@ -443,8 +445,8 @@ HMODULE LibraryLoadHooks::HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibF
 
         if (module != nullptr)
         {
-            D3d12Proxy::Init(module);
-            D3D12Hooks::Hook();
+            if (!D3d12Proxy::Init(module) || !D3D12Hooks::Hook())
+                RecordDeferredLoad(module);
         }
 
         return module;
@@ -698,72 +700,128 @@ HMODULE LibraryLoadHooks::HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibF
     return nullptr;
 }
 
-// Images the catch-up scan has handled. Only the scan's single consumer touches it. One reference is kept per image,
-// just as the normal load path does, so it cannot unload underneath installed hooks; unrelated modules are not kept.
-static std::unordered_set<HMODULE> scanHandled;
+namespace
+{
+HMODULE RetainImage(HMODULE image) noexcept
+{
+    HMODULE retained = nullptr;
+    if (!image || (reinterpret_cast<ULONG_PTR>(image) & 3) != 0 || image == dllModule)
+        return nullptr;
+    if (!KernelBaseProxy::GetModuleHandleExW_()(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                               reinterpret_cast<LPCWSTR>(image), &retained))
+        return nullptr;
+    if (retained != image)
+    {
+        NtdllProxy::FreeLibrary_Ldr(retained);
+        return nullptr;
+    }
+    return retained;
+}
+void ReleaseImage(HMODULE image) noexcept { NtdllProxy::FreeLibrary_Ldr(image); }
+}
 
+bool LibraryLoadHooks::KnownNonExecutable(HMODULE module) { return _noInit.Contains(module); }
+
+void LibraryLoadHooks::RecordNonExecutable(HMODULE module, HMODULE previous)
+{
+    _noInit.Record(module, previous, RetainImage, ReleaseImage);
+}
+
+void LibraryLoadHooks::RecordDeferredLoad(HMODULE module, bool ordinaryWin32)
+{
+    if (module == nullptr)
+        return;
+    _deferredScan.Mark();
+    if (!ordinaryWin32 || _workerClosed.load(std::memory_order_acquire) || KnownNonExecutable(module))
+        return;
+    const auto retained = RetainImage(module);
+    if (!retained)
+        return;
+    for (auto& slot : _deferredImages)
+    {
+        HMODULE empty = nullptr;
+        if (slot.compare_exchange_strong(empty, retained, std::memory_order_acq_rel))
+        {
+            if (_workerClosed.load(std::memory_order_acquire))
+            {
+                auto expected = retained;
+                if (slot.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel))
+                    ReleaseImage(retained);
+            }
+            return;
+        }
+        if (empty == retained)
+            break;
+    }
+    ReleaseImage(retained);
+}
+
+LibraryLoadHooks::RecoveryResult LibraryLoadHooks::HandleCallerModule(const std::wstring&, LPCWSTR, HMODULE module)
+{
+    return ObserveOrdinaryModule(module);
+}
+
+LibraryLoadHooks::RecoveryResult LibraryLoadHooks::ObserveOrdinaryModule(HMODULE module)
+{
+    if (!module || module == dllModule || (reinterpret_cast<ULONG_PTR>(module) & 3) != 0)
+        return RecoveryResult::NotApplicable;
+    if (State::Instance().isShuttingDown || KnownNonExecutable(module))
+        return RecoveryResult::Unsupported;
+    if (loader_boundary::OriginalOnly() || State::SkipDllChecks() || DxgiProxy::InsideFactoryCreation())
+    {
+        RecordDeferredLoad(module);
+        return RecoveryResult::Retry;
+    }
+    const auto retained = RetainImage(module);
+    if (!retained)
+        return RecoveryResult::Retry;
+    struct Reference
+    {
+        HMODULE image;
+        ~Reference() { ReleaseImage(image); }
+    } reference { retained };
+    wchar_t path[32768];
+    const auto length = GetModuleFileNameW(retained, path, static_cast<DWORD>(std::size(path)));
+    if (length == 0 || length >= std::size(path))
+        return RecoveryResult::Retry;
+    const std::wstring_view actualPath(path, length);
+    // Output-provider readiness is not recovered input interception. Only this family is supported here.
+    if (!EndsWithInsensitive(actualPath, L"\\d3d12.dll"))
+        return RecoveryResult::Unsupported;
+    if (D3d12Proxy::Module() != nullptr && D3d12Proxy::Module() != retained)
+        return RecoveryResult::Unsupported;
+    if (!D3d12Proxy::Init(retained) || !D3D12Hooks::Hook())
+    {
+        RecordDeferredLoad(retained);
+        return RecoveryResult::Retry;
+    }
+    return RecoveryResult::Ready;
+}
+
+// One post-attach opportunity; marks after it and busy/failed attempts have no eventual-retry guarantee.
 void LibraryLoadHooks::CatchUpDeferredLoads()
 {
-    _deferredScan.Run(
-        []
-        {
-            if (State::Instance().isShuttingDown)
-                return;
-
-            // Internal loader/proxy work may hold a hook's mutex or a DXGI factory lock.
-            if (State::SkipDllChecks() || DxgiProxy::InsideFactoryCreation())
-            {
-                _deferredScan.Mark();
-                return;
-            }
-
-            const DWORD error = GetLastError();
-            ScanLoadedModules();
-            SetLastError(error);
-        });
+    if (_workerClosed.exchange(true, std::memory_order_acq_rel))
+        return;
+    const DWORD error = GetLastError();
+    _deferredScan.Run([] { ScanLoadedModules(); });
+    for (auto& slot : _deferredImages)
+        if (const auto image = slot.exchange(nullptr, std::memory_order_acq_rel))
+            ReleaseImage(image);
+    SetLastError(error);
 }
 
 void LibraryLoadHooks::ScanLoadedModules()
 {
-    struct Snapshot
+    // Retained ordinary-load candidates only; no promotion of arbitrary snapshot/native images.
+    for (auto& slot : _deferredImages)
     {
-        HANDLE handle = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-        ~Snapshot()
+        if (const auto image = slot.exchange(nullptr, std::memory_order_acq_rel))
         {
-            if (handle != INVALID_HANDLE_VALUE)
-                CloseHandle(handle);
+            ObserveOrdinaryModule(image);
+            ReleaseImage(image);
         }
-    } snapshot;
-
-    if (snapshot.handle == INVALID_HANDLE_VALUE)
-    {
-        _deferredScan.Mark();
-        return;
     }
-
-    MODULEENTRY32W entry {};
-    entry.dwSize = sizeof(entry);
-    BOOL more = Module32FirstW(snapshot.handle, &entry);
-    while (more)
-    {
-        if (entry.hModule != dllModule && !scanHandled.contains(entry.hModule))
-        {
-            HMODULE module = nullptr;
-            if (KernelBaseProxy::GetModuleHandleExW_()(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                                       reinterpret_cast<LPCWSTR>(entry.hModule), &module))
-            {
-                const auto result = HandleLibraryLoad(entry.szExePath, entry.szExePath, module);
-                if (result == module)
-                    scanHandled.insert(module);
-                else
-                    NtdllProxy::FreeLibrary_Ldr(module);
-            }
-        }
-        more = Module32NextW(snapshot.handle, &entry);
-    }
-
-    if (GetLastError() != ERROR_NO_MORE_FILES)
-        _deferredScan.Mark();
 }
 
 // The modules OptiScaler keeps loaded. Plain globals only, so threads without TLS can call it

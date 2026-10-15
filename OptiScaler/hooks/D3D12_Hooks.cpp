@@ -2451,21 +2451,26 @@ static void UnhookDevice()
     ResTrack_Dx12::ReleaseDeviceHooks();
 }
 
-void D3D12Hooks::Hook()
+bool D3D12Hooks::Hook()
 {
-    std::lock_guard<std::mutex> lock(hookMutex);
-
-    LOG_DEBUG("");
+    d3d12_binding::Claim claim;
+    if (!claim || D3d12Proxy::Module() == nullptr)
+        return false;
+    loader_boundary::OriginalOnlyScope scope;
 
     if (o_D3D12CreateDevice == nullptr)
-        o_D3D12CreateDevice = D3d12Proxy::Hook_D3D12CreateDevice(hkD3D12CreateDevice);
+        D3d12Proxy::Hook_D3D12CreateDevice(hkD3D12CreateDevice, &o_D3D12CreateDevice);
 
     if (o_D3D12SerializeRootSignature == nullptr)
-        o_D3D12SerializeRootSignature = D3d12Proxy::Hook_D3D12SerializeRootSignature(hkD3D12SerializeRootSignature);
+        D3d12Proxy::Hook_D3D12SerializeRootSignature(hkD3D12SerializeRootSignature, &o_D3D12SerializeRootSignature);
 
     if (o_D3D12SerializeVersionedRootSignature == nullptr)
-        o_D3D12SerializeVersionedRootSignature =
-            D3d12Proxy::Hook_D3D12SerializeVersionedRootSignature(hkD3D12SerializeVersionedRootSignature);
+        D3d12Proxy::Hook_D3D12SerializeVersionedRootSignature(hkD3D12SerializeVersionedRootSignature,
+                                                             &o_D3D12SerializeVersionedRootSignature);
+    return o_D3D12CreateDevice != nullptr &&
+           (D3d12Proxy::D3D12SerializeRootSignature_() == nullptr || o_D3D12SerializeRootSignature != nullptr) &&
+           (D3d12Proxy::D3D12SerializeVersionedRootSignature_() == nullptr ||
+            o_D3D12SerializeVersionedRootSignature != nullptr);
 }
 
 void D3D12Hooks::HookAgility(HMODULE module)

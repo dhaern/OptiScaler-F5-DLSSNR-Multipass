@@ -150,11 +150,21 @@ int wmain(int argc, wchar_t** argv) {
 def main():
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    revision = sys.argv[2] if len(sys.argv) > 2 else None
+    def source_at(path):
+        if revision:
+            return subprocess.check_output(["git", "-C", str(ROOT), "show", f"{revision}:{path}"], text=True)
+        return (ROOT / path).read_text(encoding="utf-8-sig")
+    if not revision or "ObserveOrdinaryModule" in source_at("OptiScaler/hooks/LibraryLoad_Hooks.cpp"):
+        from loader_boundary_contract import main as boundary_main
+        return boundary_main()
+    for header in ("ThreadTls.h", "DeferredModuleScan.h"):
+        (out / header).write_text(source_at("OptiScaler/misc/" + header), encoding="utf-8")
     fixture = out / "noinit_fixture.cpp"
     fixture.write_text(FIXTURE, encoding="utf-8")
     dll = out / "sl.interposer.dll"
-    sources = (ROOT / "OptiScaler/hooks/LibraryLoad_Hooks.cpp").read_text(encoding="utf-8-sig")
-    names = (ROOT / "OptiScaler/DllNames.h").read_text(encoding="utf-8-sig")
+    sources = source_at("OptiScaler/hooks/LibraryLoad_Hooks.cpp")
+    names = source_at("OptiScaler/DllNames.h")
     code = "\n\n".join([PREAMBLE,
         function_body(names, "inline static HMODULE GetDllNameWModule("),
         function_body(sources, "void LibraryLoadHooks::CheckModulesInMemory()"),
@@ -166,7 +176,7 @@ def main():
         ["cl", "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/O2", "/LD", str(fixture),
          f"/Fe:{dll}", f"/Fo:{out / 'noinit_fixture.obj'}", "/link", f"/IMPLIB:{out / 'noinit_fixture.lib'}"],
         ["cl", "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/O2",
-         f"/I{ROOT / 'OptiScaler/misc'}", str(source),
+         f"/I{out}", str(source),
          f"/Fe:{exe}", f"/Fo:{out / 'noinit_discovery.obj'}"],
         [str(exe), str(dll)],
     ]

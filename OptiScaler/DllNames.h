@@ -3,6 +3,7 @@
 #include "SysUtils.h"
 
 #include <proxies/KernelBase_Proxy.h>
+#include <hooks/LibraryLoad_Hooks.h>
 
 #include <cwctype> // for std::towlower
 
@@ -218,7 +219,7 @@ inline static HMODULE GetDllNameModule(std::vector<std::string>* namesList)
         auto name = namesList->at(i);
         auto module = KernelBaseProxy::GetModuleHandleA_()(name.c_str());
 
-        if (module != nullptr)
+        if (module != nullptr && !LibraryLoadHooks::KnownNonExecutable(module))
             return module;
     }
 
@@ -232,7 +233,7 @@ inline static HMODULE GetDllNameWModule(std::vector<std::wstring>* namesList)
         auto name = namesList->at(i);
         auto module = KernelBaseProxy::GetModuleHandleW_()(name.c_str());
 
-        if (module != nullptr)
+        if (module != nullptr && !LibraryLoadHooks::KnownNonExecutable(module))
             return module;
     }
 

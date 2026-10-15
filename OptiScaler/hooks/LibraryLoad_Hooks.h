@@ -1,11 +1,15 @@
 #pragma once
 #include "SysUtils.h"
 #include <misc/DeferredModuleScan.h>
+#include <misc/LoaderBoundary.h>
 
 class LibraryLoadHooks
 {
   private:
     inline static constinit DeferredModuleScan _deferredScan;
+    inline static constinit loader_boundary::KnownNoInitImages _noInit;
+    inline static constinit std::atomic<HMODULE> _deferredImages[32] {};
+    inline static constinit std::atomic_bool _workerClosed { false };
     // ownLoadFailed: set when a branch matched but OptiScaler's own load of the file failed. The caller then lets the
     // original load run and calls this again with its module (loadedModule), so init and hooks still happen.
     static HMODULE HandleLibraryLoad(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE loadedModule,
@@ -15,21 +19,19 @@ class LibraryLoadHooks
     static bool StartsWithInsensitive(std::wstring_view str, std::wstring_view prefix);
 
   public:
-    static void RecordDeferredLoad(HMODULE module)
-    {
-        if (module != nullptr)
-            _deferredScan.Mark();
-    }
+    // Only ordinary Win32 loads are candidates for new recovery. Native-only marks remain informational.
+    static void RecordDeferredLoad(HMODULE module, bool ordinaryWin32 = true);
     static void CatchUpDeferredLoads();
 
     static HMODULE LoadLibraryCheckA(std::string libName, LPCSTR lpLibFullPath);
     static HMODULE LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath, bool* ownLoadFailed = nullptr);
 
     // Init and hooks for a module the caller loaded itself, after OptiScaler's own load of it failed
-    static void HandleCallerModule(std::wstring libName, LPCWSTR lpLibFullPath, HMODULE module)
-    {
-        HandleLibraryLoad(std::move(libName), lpLibFullPath, module);
-    }
+    enum class RecoveryResult { Ready, Retry, Unsupported, NotApplicable };
+    static RecoveryResult HandleCallerModule(const std::wstring& libName, LPCWSTR lpLibFullPath, HMODULE module);
+    static RecoveryResult ObserveOrdinaryModule(HMODULE module);
+    static void RecordNonExecutable(HMODULE module, HMODULE previous);
+    static bool KnownNonExecutable(HMODULE module);
     static std::optional<NTSTATUS> FreeLibrary(PVOID library);
     // True for the modules FreeLibrary keeps loaded. Reads plain globals only, so it is safe on threads without a
     // static-TLS array (misc/ThreadTls.h), where FreeLibrary itself can't run.

@@ -7,6 +7,7 @@
 
 #include "LibraryLoad_Hooks.h"
 #include "Hook_Utils.h"
+#include <misc/LoaderBoundary.h>
 
 #include <cwctype>
 
@@ -27,7 +28,6 @@ class NtdllHooks
         if (ThreadHasNoTls())
             return o_RtlGetVersion(lpVersionInformation);
 
-        LibraryLoadHooks::CatchUpDeferredLoads();
 
         if (lpVersionInformation == nullptr)
             return STATUS_INVALID_PARAMETER;
@@ -50,34 +50,49 @@ class NtdllHooks
                                        PHANDLE ModuleHandle)
     {
         const DWORD entryError = GetLastError();
+        if (loader_boundary::OriginalOnly())
+        {
+            SetLastError(entryError);
+            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        }
         if (ThreadHasNoTls())
         {
             auto result = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
             if (NT_SUCCESS(result) && ModuleHandle != nullptr)
-                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle));
+                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle), false);
             return result;
         }
 
-        LibraryLoadHooks::CatchUpDeferredLoads();
+        const auto original = [&]()
+        {
+            loader_boundary::OriginalOnlyScope scope;
+            SetLastError(entryError);
+            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        };
 
+        // Preserve the historical local null-output status; original-only branches forward untouched inputs.
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
         if (ModuleFileName == nullptr || ModuleFileName->Length == 0 || ModuleFileName->Buffer == nullptr ||
             ModuleFileName->Length % sizeof(wchar_t) != 0 || ModuleFileName->Length > ModuleFileName->MaximumLength)
-            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+            return original();
 
-        const std::wstring name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        // Native flag values are not Win32 dwFlags. Unrecognized native modes are original-only.
+        if (Flags != nullptr && *Flags != 0)
+            return original();
+        const std::wstring_view view(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        if (State::Instance().isShuttingDown || LibraryLoadHooks::IsApiSetName(view) ||
+            view.find(L'\0') != std::wstring_view::npos)
+            return original();
+
+        std::wstring name;
+        if (!loader_boundary::CopyName(view, name))
+            return original();
 
 #ifdef _DEBUG
         // LOG_DEBUG("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
-
-        if (State::Instance().isShuttingDown)
-            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
-
-        if (LibraryLoadHooks::IsApiSetName(name))
-            return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
 
         if (State::SkipDllChecks())
         {
@@ -87,7 +102,7 @@ class NtdllHooks
                 LibraryLoadHooks::EndsWithInsensitive(name, std::wstring(skip + L".dll")))
             {
                 LOG_TRACE("Skip checks for: {}", wstring_to_string(name.data()));
-                return o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+                return original();
             }
         }
 
@@ -112,16 +127,10 @@ class NtdllHooks
         }
 
         SetLastError(entryError);
-        const NTSTATUS status = o_LdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const NTSTATUS status = original();
         const DWORD originalError = GetLastError();
 
-        // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
-        if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
-        {
-            const std::wstring fullName(name);
-            LibraryLoadHooks::HandleCallerModule(fullName, fullName.c_str(), (HMODULE) *ModuleHandle);
-        }
-
+        // Arbitrary native recovery has no supported caller-context/provenance contract.
         SetLastError(originalError);
         return status;
     }
@@ -130,34 +139,49 @@ class NtdllHooks
                                       PHANDLE ModuleHandle)
     {
         const DWORD entryError = GetLastError();
+        if (loader_boundary::OriginalOnly())
+        {
+            SetLastError(entryError);
+            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        }
         if (ThreadHasNoTls())
         {
             auto result = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
             if (NT_SUCCESS(result) && ModuleHandle != nullptr)
-                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle));
+                LibraryLoadHooks::RecordDeferredLoad(static_cast<HMODULE>(*ModuleHandle), false);
             return result;
         }
 
-        LibraryLoadHooks::CatchUpDeferredLoads();
+        const auto original = [&]()
+        {
+            loader_boundary::OriginalOnlyScope scope;
+            SetLastError(entryError);
+            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        };
 
+        // Preserve the historical local null-output status; original-only branches forward untouched inputs.
         if (ModuleHandle == nullptr)
             return STATUS_INVALID_PARAMETER;
 
         if (ModuleFileName == nullptr || ModuleFileName->Length == 0 || ModuleFileName->Buffer == nullptr ||
             ModuleFileName->Length % sizeof(wchar_t) != 0 || ModuleFileName->Length > ModuleFileName->MaximumLength)
-            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+            return original();
 
-        const std::wstring name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        // Native flag values are not Win32 dwFlags. Unrecognized native modes are original-only.
+        if (Flags != nullptr && *Flags != 0)
+            return original();
+        const std::wstring_view view(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(wchar_t));
+        if (State::Instance().isShuttingDown || LibraryLoadHooks::IsApiSetName(view) ||
+            view.find(L'\0') != std::wstring_view::npos)
+            return original();
+
+        std::wstring name;
+        if (!loader_boundary::CopyName(view, name))
+            return original();
 
 #ifdef _DEBUG
         // LOG_DEBUG("{}, caller: {}", wstring_to_string(name.data()), Util::WhoIsTheCaller(_ReturnAddress()));
 #endif
-
-        if (State::Instance().isShuttingDown)
-            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
-
-        if (LibraryLoadHooks::IsApiSetName(name))
-            return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
 
         // PathToFile is the native search path, not the requested module filename.
         const auto& path = name;
@@ -170,7 +194,7 @@ class NtdllHooks
                 LibraryLoadHooks::EndsWithInsensitive(name, std::wstring(skip + L".dll")))
             {
                 LOG_TRACE("Skip checks for: {}", wstring_to_string(name.data()));
-                return o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+                return original();
             }
         }
 
@@ -196,16 +220,10 @@ class NtdllHooks
         }
 
         SetLastError(entryError);
-        const NTSTATUS status = o_NtLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+        const NTSTATUS status = original();
         const DWORD originalError = GetLastError();
 
-        // OptiScaler's own load of a handled DLL failed where the caller's succeeded: handle the caller's module
-        if (ownLoadFailed && status >= 0 && ModuleHandle != nullptr && *ModuleHandle != nullptr)
-        {
-            const std::wstring fullPath(path);
-            LibraryLoadHooks::HandleCallerModule(std::wstring(name), fullPath.c_str(), (HMODULE) *ModuleHandle);
-        }
-
+        // Arbitrary native recovery has no supported caller-context/provenance contract.
         SetLastError(originalError);
         return status;
     }
@@ -221,7 +239,6 @@ class NtdllHooks
             return o_LdrUnloadDll(lpLibrary);
         }
 
-        LibraryLoadHooks::CatchUpDeferredLoads();
 
         if (lpLibrary == nullptr)
             return STATUS_INVALID_PARAMETER;
