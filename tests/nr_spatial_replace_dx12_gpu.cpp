@@ -281,7 +281,13 @@ int Setup(Game& g, const fs::path& repo)
         g.pso = Raster(g, g.rs.Get(), vs, shader, false);
         g.marginPso = Raster(g, g.rs.Get(), vs, margin, false);
     }
-    g.scenePso = Raster(g, g.sceneRs.Get(), vs, scene, true);
+    // Scene coverage must survive jitter at the viewport edge: the unchanged margin pass samples that input.
+    Bytes sceneVs;
+    if (CompileHlsl("float4 main(uint id : SV_VertexID) : SV_Position { float2 p = float2((id << 1) & 2, id & 2);"
+                    " return float4(p * float2(4, -4) + float2(-2, 2), 0.5, 1); }", "main", "vs_5_1", sceneVs) !=
+        CompileResult::Success)
+        return 2;
+    g.scenePso = Raster(g, g.sceneRs.Get(), sceneVs, scene, true);
     if (!g.pso || !g.scenePso || (!g.compute && !g.marginPso))
         return 2;
     if (g.priv)
