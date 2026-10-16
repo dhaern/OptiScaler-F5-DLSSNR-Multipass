@@ -2466,7 +2466,7 @@ bool D3D12Hooks::Hook()
 
     if (o_D3D12SerializeVersionedRootSignature == nullptr)
         D3d12Proxy::Hook_D3D12SerializeVersionedRootSignature(hkD3D12SerializeVersionedRootSignature,
-                                                             &o_D3D12SerializeVersionedRootSignature);
+                                                              &o_D3D12SerializeVersionedRootSignature);
     return o_D3D12CreateDevice != nullptr &&
            (D3d12Proxy::D3D12SerializeRootSignature_() == nullptr || o_D3D12SerializeRootSignature != nullptr) &&
            (D3d12Proxy::D3D12SerializeVersionedRootSignature_() == nullptr ||

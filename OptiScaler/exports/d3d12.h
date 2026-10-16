@@ -62,8 +62,9 @@ HRESULT _D3D12CreateRootSignatureDeserializerExport(LPCVOID pSrcData, SIZE_T Src
     if (D3d12Proxy::Module() == nullptr)
         D3d12Proxy::Init();
     const auto method = D3d12Proxy::D3D12CreateRootSignatureDeserializer_Hooked();
-    return method ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
-                  : E_FAIL;
+    return method
+               ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
+               : E_FAIL;
 }
 
 HRESULT _D3D12SerializeVersionedRootSignatureExport(D3D12_VERSIONED_ROOT_SIGNATURE_DESC* pRootSignature,
@@ -82,8 +83,9 @@ HRESULT _D3D12CreateVersionedRootSignatureDeserializerExport(LPCVOID pSrcData, S
     if (D3d12Proxy::Module() == nullptr)
         D3d12Proxy::Init();
     const auto method = D3d12Proxy::D3D12CreateVersionedRootSignatureDeserializer_Hooked();
-    return method ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
-                  : E_FAIL;
+    return method
+               ? method(pSrcData, SrcDataSizeInBytes, pRootSignatureDeserializerInterface, ppRootSignatureDeserializer)
+               : E_FAIL;
 }
 
 HRESULT _D3D12GetDebugInterfaceExport(REFIID riid, void** ppDebug)

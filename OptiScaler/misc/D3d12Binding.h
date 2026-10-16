@@ -11,9 +11,13 @@ class Claim
 
   public:
     explicit operator bool() const noexcept { return acquired; }
-    ~Claim() { if (acquired) owner.clear(std::memory_order_release); }
+    ~Claim()
+    {
+        if (acquired)
+            owner.clear(std::memory_order_release);
+    }
     Claim() = default;
     Claim(const Claim&) = delete;
     Claim& operator=(const Claim&) = delete;
 };
-}
+} // namespace d3d12_binding

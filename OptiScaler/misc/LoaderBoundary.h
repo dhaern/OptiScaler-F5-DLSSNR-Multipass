@@ -75,8 +75,8 @@ class OriginalOnlyScope
 
 inline bool NonExecutable(DWORD flags) noexcept
 {
-    return (flags & (DONT_RESOLVE_DLL_REFERENCES | LOAD_LIBRARY_AS_DATAFILE |
-                     LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) != 0;
+    return (flags & (DONT_RESOLVE_DLL_REFERENCES | LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE |
+                     LOAD_LIBRARY_AS_IMAGE_RESOURCE)) != 0;
 }
 
 // Retained veto identities cannot be confused with a subsequently reused HMODULE.
@@ -99,7 +99,8 @@ class KnownNoInitImages
     template <class Retain, class Release>
     void Record(HMODULE module, HMODULE previous, Retain retain, Release release) noexcept
     {
-        if (module == nullptr || (reinterpret_cast<ULONG_PTR>(module) & 3) != 0 || module == previous || Contains(module))
+        if (module == nullptr || (reinterpret_cast<ULONG_PTR>(module) & 3) != 0 || module == previous ||
+            Contains(module))
             return;
         const auto retained = retain(module);
         if (retained == nullptr)
@@ -140,4 +141,4 @@ inline bool CopyName(std::wstring_view view, std::wstring& name) noexcept
         return false;
     }
 }
-}
+} // namespace loader_boundary

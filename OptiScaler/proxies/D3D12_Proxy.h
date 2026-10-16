@@ -54,8 +54,9 @@ class D3d12Proxy
         }
 
         HMODULE retained = nullptr;
-        const bool acquired = KernelBaseProxy::GetModuleHandleExW_()(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(module), &retained) != FALSE;
+        const bool acquired =
+            KernelBaseProxy::GetModuleHandleExW_()(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                                   reinterpret_cast<LPCWSTR>(module), &retained) != FALSE;
         if (ownReference)
             NtdllProxy::FreeLibrary_Ldr(module);
         if (!acquired)
@@ -70,18 +71,21 @@ class D3d12Proxy
         }
 
         _D3D12CreateDevice = (PFN_D3D12CreateDevice) KernelBaseProxy::GetProcAddress_()(retained, "D3D12CreateDevice");
-        _D3D12SerializeRootSignature = (PFN_D3D12SerializeRootSignature)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12SerializeRootSignature");
-        _D3D12CreateRootSignatureDeserializer = (PFN_D3D12CreateRootSignatureDeserializer)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12CreateRootSignatureDeserializer");
-        _D3D12SerializeVersionedRootSignature = (PFN_D3D12SerializeVersionedRootSignature)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12SerializeVersionedRootSignature");
-        _D3D12CreateVersionedRootSignatureDeserializer = (PFN_D3D12CreateVersionedRootSignatureDeserializer)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12CreateVersionedRootSignatureDeserializer");
-        _D3D12GetDebugInterface = (PFN_D3D12GetDebugInterface)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12GetDebugInterface");
-        _D3D12EnableExperimentalFeatures = (PFN_D3D12EnableExperimentalFeatures)
-            KernelBaseProxy::GetProcAddress_()(retained, "D3D12EnableExperimentalFeatures");
+        _D3D12SerializeRootSignature = (PFN_D3D12SerializeRootSignature) KernelBaseProxy::GetProcAddress_()(
+            retained, "D3D12SerializeRootSignature");
+        _D3D12CreateRootSignatureDeserializer =
+            (PFN_D3D12CreateRootSignatureDeserializer) KernelBaseProxy::GetProcAddress_()(
+                retained, "D3D12CreateRootSignatureDeserializer");
+        _D3D12SerializeVersionedRootSignature =
+            (PFN_D3D12SerializeVersionedRootSignature) KernelBaseProxy::GetProcAddress_()(
+                retained, "D3D12SerializeVersionedRootSignature");
+        _D3D12CreateVersionedRootSignatureDeserializer =
+            (PFN_D3D12CreateVersionedRootSignatureDeserializer) KernelBaseProxy::GetProcAddress_()(
+                retained, "D3D12CreateVersionedRootSignatureDeserializer");
+        _D3D12GetDebugInterface =
+            (PFN_D3D12GetDebugInterface) KernelBaseProxy::GetProcAddress_()(retained, "D3D12GetDebugInterface");
+        _D3D12EnableExperimentalFeatures = (PFN_D3D12EnableExperimentalFeatures) KernelBaseProxy::GetProcAddress_()(
+            retained, "D3D12EnableExperimentalFeatures");
         _D3D12GetInterface = (PFN_D3D12GetInterface) KernelBaseProxy::GetProcAddress_()(retained, "D3D12GetInterface");
         if (_D3D12CreateDevice == nullptr)
         {
@@ -97,7 +101,10 @@ class D3d12Proxy
 
     // Original methods
     static PFN_D3D12CreateDevice D3D12CreateDevice_() { return Module() != nullptr ? _D3D12CreateDevice : nullptr; }
-    static PFN_D3D12SerializeRootSignature D3D12SerializeRootSignature_() { return Module() != nullptr ? _D3D12SerializeRootSignature : nullptr; }
+    static PFN_D3D12SerializeRootSignature D3D12SerializeRootSignature_()
+    {
+        return Module() != nullptr ? _D3D12SerializeRootSignature : nullptr;
+    }
     static PFN_D3D12CreateRootSignatureDeserializer D3D12CreateRootSignatureDeserializer_()
     {
         return Module() != nullptr ? _D3D12CreateRootSignatureDeserializer : nullptr;
@@ -110,7 +117,10 @@ class D3d12Proxy
     {
         return Module() != nullptr ? _D3D12CreateVersionedRootSignatureDeserializer : nullptr;
     }
-    static PFN_D3D12GetDebugInterface D3D12GetDebugInterface_() { return Module() != nullptr ? _D3D12GetDebugInterface : nullptr; }
+    static PFN_D3D12GetDebugInterface D3D12GetDebugInterface_()
+    {
+        return Module() != nullptr ? _D3D12GetDebugInterface : nullptr;
+    }
     static PFN_D3D12EnableExperimentalFeatures D3D12EnableExperimentalFeatures_()
     {
         return Module() != nullptr ? _D3D12EnableExperimentalFeatures : nullptr;
@@ -206,7 +216,8 @@ class D3d12Proxy
         return addr;
     }
 
-    static bool Hook_D3D12SerializeVersionedRootSignature(PVOID method, PFN_D3D12SerializeVersionedRootSignature* original)
+    static bool Hook_D3D12SerializeVersionedRootSignature(PVOID method,
+                                                          PFN_D3D12SerializeVersionedRootSignature* original)
     {
         return AttachExport(D3D12SerializeVersionedRootSignature_ForHook(), method, original);
     }

@@ -34,8 +34,6 @@
 #include <misc/IdentifyGpu.h>
 #include <low_latency/input/input_uell.h>
 
-
-
 // #define LOG_LIB_OPERATIONS
 
 HMODULE LibraryLoadHooks::LoadLibraryCheckA(std::string libName, LPCSTR lpLibFullPath)
@@ -708,7 +706,7 @@ HMODULE RetainImage(HMODULE image) noexcept
     if (!image || (reinterpret_cast<ULONG_PTR>(image) & 3) != 0 || image == dllModule)
         return nullptr;
     if (!KernelBaseProxy::GetModuleHandleExW_()(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                                               reinterpret_cast<LPCWSTR>(image), &retained))
+                                                reinterpret_cast<LPCWSTR>(image), &retained))
         return nullptr;
     if (retained != image)
     {
@@ -718,7 +716,7 @@ HMODULE RetainImage(HMODULE image) noexcept
     return retained;
 }
 void ReleaseImage(HMODULE image) noexcept { NtdllProxy::FreeLibrary_Ldr(image); }
-}
+} // namespace
 
 bool LibraryLoadHooks::KnownNonExecutable(HMODULE module) { return _noInit.Contains(module); }
 

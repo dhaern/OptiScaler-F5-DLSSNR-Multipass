@@ -27,7 +27,13 @@ class LibraryLoadHooks
     static HMODULE LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibFullPath, bool* ownLoadFailed = nullptr);
 
     // Init and hooks for a module the caller loaded itself, after OptiScaler's own load of it failed
-    enum class RecoveryResult { Ready, Retry, Unsupported, NotApplicable };
+    enum class RecoveryResult
+    {
+        Ready,
+        Retry,
+        Unsupported,
+        NotApplicable
+    };
     static RecoveryResult HandleCallerModule(const std::wstring& libName, LPCWSTR lpLibFullPath, HMODULE module);
     static RecoveryResult ObserveOrdinaryModule(HMODULE module);
     static void RecordNonExecutable(HMODULE module, HMODULE previous);

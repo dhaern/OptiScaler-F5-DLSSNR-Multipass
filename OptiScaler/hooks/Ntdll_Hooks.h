@@ -28,7 +28,6 @@ class NtdllHooks
         if (ThreadHasNoTls())
             return o_RtlGetVersion(lpVersionInformation);
 
-
         if (lpVersionInformation == nullptr)
             return STATUS_INVALID_PARAMETER;
 
@@ -238,7 +237,6 @@ class NtdllHooks
 
             return o_LdrUnloadDll(lpLibrary);
         }
-
 
         if (lpLibrary == nullptr)
             return STATUS_INVALID_PARAMETER;

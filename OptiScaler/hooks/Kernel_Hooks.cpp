@@ -166,7 +166,6 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleA(LPCSTR lpModuleName)
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleA(lpModuleName);
 
-
     if (lpModuleName != NULL)
     {
         if (strcmp(lpModuleName, "nvngx_dlssg.dll") == 0)
@@ -207,7 +206,6 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleW(LPCWSTR lpModuleName)
 {
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleW(lpModuleName);
-
 
     if (lpModuleName != NULL)
     {
@@ -300,7 +298,6 @@ BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModul
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleExA(dwFlags, lpModuleName, phModule);
 
-
     // Flags first: with GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS lpModuleName is an address, not a name to compare
     if (dwFlags == 0 && lpModuleName && IsXellName(lpModuleName))
     {
@@ -318,7 +315,6 @@ BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModu
 {
     if (ThreadHasNoTls())
         return o_K32_GetModuleHandleExW(dwFlags, lpModuleName, phModule);
-
 
     if (lpModuleName && dwFlags == GET_MODULE_HANDLE_EX_FLAG_PIN && lstrcmpW(L"nvapi64.dll", lpModuleName) == 0 &&
         phModule)
@@ -823,7 +819,6 @@ BOOL KernelHooks::hk_K32_FreeLibrary(HMODULE lpLibrary)
 
         return o_K32_FreeLibrary(lpLibrary);
     }
-
 
     if (lpLibrary == nullptr)
         return STATUS_INVALID_PARAMETER;
