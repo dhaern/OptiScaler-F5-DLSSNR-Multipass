@@ -295,11 +295,11 @@ void NativeProducer::RecordSteps(ID3D12GraphicsCommandList* list, const FrameInp
     if (timer != nullptr)
         _flow->SetTimestampHeap(timer->Heap(), timer->Room() < 64u ? timer->Room() : 64u, timer->NextIndex());
 
-    const bool recorded = _flow->Dispatch(
-        list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
-        flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed, encoding,
-        steps.touched != nullptr ? options.flowFinestLevel : 0, steps.touched != nullptr ? options.smoothRadius : -1,
-        input.jitter[0], input.jitter[1]);
+    const bool recorded =
+        _flow->Dispatch(list, input.picture, input.pictureFormat, flowDepth ? input.depth[0] : nullptr,
+                        flowDepth ? input.depthView : DXGI_FORMAT_UNKNOWN, input.depthReversed, encoding,
+                        steps.touched != nullptr ? options.flowFinestLevel : 0,
+                        steps.touched != nullptr ? options.smoothRadius : -1, input.jitter[0], input.jitter[1]);
 
     if (timer != nullptr)
     {
@@ -480,8 +480,8 @@ void NativeProducer::RecordSteps(ID3D12GraphicsCommandList* list, const FrameInp
     {
         // Enlarging the motion by surface (TrustMask Settings::guideSurface) reads the depth guide: keep it then.
         const bool directDepth =
-            inList && !_trust->Tuning().guideSurface && nativeInputs.depthCount == 1 && nativeInputs.depthWidth == input.width &&
-            nativeInputs.depthHeight == input.height &&
+            inList && !_trust->Tuning().guideSurface && nativeInputs.depthCount == 1 &&
+            nativeInputs.depthWidth == input.width && nativeInputs.depthHeight == input.height &&
             (nativeInputs.depthFormat == DXGI_FORMAT_R32_FLOAT || nativeInputs.depthFormat == DXGI_FORMAT_R16_UNORM ||
              nativeInputs.depthFormat == DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
              nativeInputs.depthFormat == DXGI_FORMAT_R24_UNORM_X8_TYPELESS);

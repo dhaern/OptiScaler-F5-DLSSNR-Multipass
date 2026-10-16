@@ -359,8 +359,7 @@ bool VirtualUpscalerDriver::CreateFeature(ID3D12GraphicsCommandList* cmd, const 
 bool VirtualUpscalerDriver::SameShape(const Key& a, const Key& b)
 {
     return a.width == b.width && a.height == b.height && a.outWidth == b.outWidth && a.outHeight == b.outHeight &&
-           a.format == b.format && a.outFormat == b.outFormat && a.lowResMV == b.lowResMV &&
-           a.backend == b.backend;
+           a.format == b.format && a.outFormat == b.outFormat && a.lowResMV == b.lowResMV && a.backend == b.backend;
 }
 
 bool VirtualUpscalerDriver::EnsureFeature(ID3D12GraphicsCommandList* cmd, const Key& key, bool rebuild, bool realDepth)
@@ -984,12 +983,14 @@ bool VirtualUpscalerDriver::Upscale(ID3D12GraphicsCommandList* cmd, const Native
     const auto inOutput = usesSettings ? fgOutput : kWrite;
     const auto inExposure = usesSettings ? SettingOr(cfg.ExposureResourceBarrier, kRead) : kRead;
 
-    // What NR does with this frame (VirtualUpscalerMode.h): nothing (off), runs on the picture in place with the backend
-    // only counted, or runs around the backend's pass as for a game's call.
-    // RunScaled always runs the backend: NR in place is a Run route only.
-    const auto route = target != nullptr ? VuNrRoute::BackendPass : DecideVuNrRoute(
-        cfg.DlssNrEnabled.value_or_default(),
-        VuPassSettingFromIni(cfg.DlssNrNativeUpscalerPass.has_value(), cfg.DlssNrNativeUpscalerPass.value_or_default()));
+    // What NR does with this frame (VirtualUpscalerMode.h): nothing (off), runs on the picture in place with the
+    // backend only counted, or runs around the backend's pass as for a game's call. RunScaled always runs the backend:
+    // NR in place is a Run route only.
+    const auto route = target != nullptr
+                           ? VuNrRoute::BackendPass
+                           : DecideVuNrRoute(cfg.DlssNrEnabled.value_or_default(),
+                                             VuPassSettingFromIni(cfg.DlssNrNativeUpscalerPass.has_value(),
+                                                                  cfg.DlssNrNativeUpscalerPass.value_or_default()));
 
     // NR on the picture itself comes first, before anything copies the picture: frame generation's HUD-less picture (the
     // copy into Output below, captured at UpscaleEnd) must be the one that is presented, NR included. Built from a picture
@@ -999,8 +1000,8 @@ bool VirtualUpscalerDriver::Upscale(ID3D12GraphicsCommandList* cmd, const Native
 
     if (route == VuNrRoute::InPlace)
         nrRan = DlssNr::ApplyVirtualUpscalerInput(run.queue, cmd, frame.color, frame.depth, frame.motion,
-                                                  frame.historyDistrust, frame.depthReversed, frame.reset, run.colorSpace,
-                                                  frame.pictureState, run.epoch);
+                                                  frame.historyDistrust, frame.depthReversed, frame.reset,
+                                                  run.colorSpace, frame.pictureState, run.epoch);
     else if (target == nullptr)
         DlssNr::NativeInputSkipped(); // NR off or on the backend's output: in place, its history starts over next time
 
@@ -1143,8 +1144,9 @@ bool VirtualUpscalerDriver::Upscale(ID3D12GraphicsCommandList* cmd, const Native
         // (inputs/FG/Upscaler_Inputs_Dx12.cpp:112-113, 175-179, 214, 232).
         static constinit std::atomic<bool> hudFixNoted {};
         if (Config::Instance()->FGHUDFix.value_or_default() && !hudFixNoted.exchange(true))
-            LOG_INFO("Spatial pass: FGHUDFix is not used with the replaced FSR1 pass; frame generation's HUD-less colour "
-                     "is taken after the game's sharpening pass");
+            LOG_INFO(
+                "Spatial pass: FGHUDFix is not used with the replaced FSR1 pass; frame generation's HUD-less colour "
+                "is taken after the game's sharpening pass");
         UpscalerInputsDx12::UpscaleStart(cmd, params, _feature.get(), false);
         UpscalerInputsDx12::UpscaleEnd(cmd, params, _feature.get(), false);
         mark("fg_inputs");
@@ -1203,10 +1205,10 @@ bool VirtualUpscalerDriver::Upscale(ID3D12GraphicsCommandList* cmd, const Native
         if (target == nullptr)
             LOG_INFO("Virtual upscaler: Evaluate {} -> {}, {} {}x{}, colour format {}{}, reset {}, depth reversed {}",
                      _evaluations,
-                     route == VuNrRoute::None    ? "pass-through"
+                     route == VuNrRoute::None      ? "pass-through"
                      : route == VuNrRoute::InPlace ? (nrRan ? "no pass (NR in place)" : "no pass (NR did not run)")
-                     : evaluated                 ? "true"
-                                                 : "false",
+                     : evaluated                   ? "true"
+                                                   : "false",
                      _backendName, key.width, key.height, (int) key.format, copyIn ? " (copied)" : "", reset,
                      _featureKey.depthReversed);
         else

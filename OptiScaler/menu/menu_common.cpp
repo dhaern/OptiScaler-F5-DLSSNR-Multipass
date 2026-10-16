@@ -2945,7 +2945,6 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
         if (config->ReplaceGameFsr1.value_or_default() && !SpatialPassDx12::Installed())
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Requires a game restart");
-
     }
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())

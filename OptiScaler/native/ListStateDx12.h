@@ -16,7 +16,7 @@ struct ListState
 {
     static constexpr int kMaxRoot = 64; // root parameters tracked per signature (D3D12 allows up to 64 DWORDs)
 
-    uint32_t generation = 0; // bumped by Begin(); lets callers notice a Reset
+    uint32_t generation = 0;                    // bumped by Begin(); lets callers notice a Reset
     spatial_tracking::Device* device = nullptr; // cold creation/first Reset association, preserved across Reset
     bool forwarding = false;
     bool inEnvelope = false;           // true while we record our own work: our calls are not tracked
@@ -53,7 +53,7 @@ struct ListState
     D3D12_VIEWPORT viewport0 {};
     bool viewport0Valid = false;
     UINT viewportCount = 0;
-    bool dsvValid = false; // a depth-stencil view bound by OMSetRenderTargets or BeginRenderPass
+    bool dsvValid = false;  // a depth-stencil view bound by OMSetRenderTargets or BeginRenderPass
     D3D12_RECT scissor0 {}; // first scissor rectangle as last set
     bool scissor0Valid = false;
     bool predicated = false; // SetPredication with a buffer since Begin, not cleared by one with none since

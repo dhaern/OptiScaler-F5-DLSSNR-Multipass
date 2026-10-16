@@ -119,8 +119,8 @@ Heap::Shadow* LooseSlot(SIZE_T cpu, bool create, spatial_tracking::Device* devic
     {
         if (!create)
             return nullptr;
-        auto* fresh =
-            static_cast<Loose*>(VirtualAlloc(nullptr, kLoose * sizeof(Loose), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        auto* fresh = static_cast<Loose*>(
+            VirtualAlloc(nullptr, kLoose * sizeof(Loose), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!fresh)
             return nullptr;
         void* expected = table;
@@ -155,8 +155,8 @@ Heap::Shadow* LooseSlot(SIZE_T cpu, bool create, spatial_tracking::Device* devic
 Heap::Shadow* Slot(SIZE_T cpu, bool rtv, bool create, spatial_tracking::Device* device)
 {
     if (Heap* h = FindCpu(cpu, device))
-        return h->views && (h->type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) == rtv
-                   ? &h->views[(cpu - h->cpu) / h->increment] : nullptr;
+        return h->views && (h->type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) == rtv ? &h->views[(cpu - h->cpu) / h->increment]
+                                                                              : nullptr;
     if (!spatial_tracking::Available(device) || (!create && !device->loose.load(std::memory_order_acquire)))
         return nullptr;
     auto* slot = LooseSlot(cpu, create, device);
@@ -379,7 +379,8 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
     if (!device || !device->active.load(std::memory_order_acquire) || !object || !increment || !desc.NumDescriptors ||
         desc.Type >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES)
         return;
-    const bool tracked = desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    const bool tracked =
+        desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     if (tracked)
         device->increments[desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV].store(increment, std::memory_order_relaxed);
     const SIZE_T cpu = object->GetCPUDescriptorHandleForHeapStart().ptr;
@@ -397,7 +398,7 @@ void OnCreateHeap(ID3D12DescriptorHeap* object, const D3D12_DESCRIPTOR_HEAP_DESC
     new (h) Heap {};
     if (tracked)
         h->views = static_cast<Heap::Shadow*>(VirtualAlloc(nullptr, size_t(desc.NumDescriptors) * sizeof(Heap::Shadow),
-                                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+                                                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (tracked && !h->views)
     {
         Retire(object, cpu, bytes, device);

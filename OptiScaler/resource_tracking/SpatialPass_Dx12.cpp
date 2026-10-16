@@ -59,7 +59,8 @@ constinit std::atomic<double> g_fgPresentMs {};
 constinit std::atomic<uint64_t> g_swapPresents {}, g_beforeScene {};
 constinit std::atomic<int> g_frameSource {};
 constinit std::atomic<ID3D12Resource*> g_hudlessSource {};
-constinit std::atomic<uint64_t> g_hudlessFrame {}, g_hudlessMissed {}, g_hudlessOther {}, g_hudlessSize {}, g_hudlessInPass {};
+constinit std::atomic<uint64_t> g_hudlessFrame {}, g_hudlessMissed {}, g_hudlessOther {}, g_hudlessSize {},
+    g_hudlessInPass {};
 constinit std::atomic<int> g_hudlessIndex {};
 constinit std::atomic<bool> g_hudlessMatch[2] {};
 constinit std::atomic<uint32_t> g_otherViewport {}; // last depth-bound viewport not of the render size, w << 16 | h
@@ -813,8 +814,8 @@ bool FgTakesHudless()
     const auto& state = State::Instance();
     auto* fg = state.currentFG;
     const auto* cfg = Config::Instance();
-    return fg && state.activeFgInput == FGInput::Upscaler && fg->IsActive() && !fg->IsPaused() &&
-           cfg->IsFGEnabled() && state.currentSwapchain && !cfg->FGDisableHudless.value_or_default();
+    return fg && state.activeFgInput == FGInput::Upscaler && fg->IsActive() && !fg->IsPaused() && cfg->IsFGEnabled() &&
+           state.currentSwapchain && !cfg->FGDisableHudless.value_or_default();
 }
 void MatchHudless(ListState& s, const Facts& f)
 {
@@ -1066,17 +1067,18 @@ void HandHudless(List* list, const ListState& s, ID3D12Resource* resource, D3D12
     (fg->SetResource(&hudless) ? g_hudless : g_hudlessRefused).fetch_add(1, std::memory_order_relaxed);
 }
 // Scene jitter, decided per draw: geometry (indexed, more than a quad, or instanced) drawn with a depth-stencil view
-// under the single viewport of the render size is moved by the list's offset (the frame's at the list's first such draw,
-// kept until Reset); a full-screen pass (a triangle or 4-vertex strip, once) is not: it does not go through the camera and
-// moving it would only resample its input. The viewport is set again only when that changes; user[3] holds whether the
-// list's viewport is the moved one.
+// under the single viewport of the render size is moved by the list's offset (the frame's at the list's first such
+// draw, kept until Reset); a full-screen pass (a triangle or 4-vertex strip, once) is not: it does not go through the
+// camera and moving it would only resample its input. The viewport is set again only when that changes; user[3] holds
+// whether the list's viewport is the moved one.
 template <class List> void JitterForDraw(List* object, ListState& s, bool geometry)
 {
     uint64_t bits = s.user[5];
     bool want = false;
     if (geometry && s.dsvValid && s.viewportCount == 1 && s.viewport0Valid)
     {
-        const float rw = float(g_inW.load(std::memory_order_relaxed)), rh = float(g_inH.load(std::memory_order_relaxed));
+        const float rw = float(g_inW.load(std::memory_order_relaxed)),
+                    rh = float(g_inH.load(std::memory_order_relaxed));
         want = std::abs(s.viewport0.Width - rw) <= 1.f && std::abs(s.viewport0.Height - rh) <= 1.f;
         if (!want)
             g_otherViewport.store(UINT(s.viewport0.Width) << 16 | (UINT(s.viewport0.Height) & 0xFFFF),
@@ -1180,8 +1182,9 @@ template <int Slot, class This, class... Args, auto Update> struct StateHook<Slo
             if (s->user[5] || g_jitter.load(std::memory_order_relaxed))
             {
                 bool geometry = true;
-                // (vertices or indices, instances, ...): a full-screen pass is one triangle (or a 4-vertex strip), once;
-                // an indexed quad is world geometry (walls, water planes, decals, particles) and moves with the scene
+                // (vertices or indices, instances, ...): a full-screen pass is one triangle (or a 4-vertex strip),
+                // once; an indexed quad is world geometry (walls, water planes, decals, particles) and moves with the
+                // scene
                 if constexpr (Slot == 12 || Slot == 13)
                 {
                     const std::tuple<Args...> draw(args...);
@@ -1579,8 +1582,7 @@ static void EndFrame()
     g_movedLastFrame.store(g_applied.exchange(0, std::memory_order_relaxed) != 0, std::memory_order_relaxed);
     if (g_hudlessSource.exchange(nullptr))
         g_hudlessMissed.fetch_add(1, std::memory_order_relaxed);
-    if (g_jitterOff.load(std::memory_order_relaxed) ||
-        presents - g_lastPassPresent.load(std::memory_order_relaxed) > 4)
+    if (g_jitterOff.load(std::memory_order_relaxed) || presents - g_lastPassPresent.load(std::memory_order_relaxed) > 4)
         g_jitter.store(0, std::memory_order_relaxed);
     else if (g_passSinceAdvance.exchange(false, std::memory_order_relaxed) && g_inW.load() && g_inH.load())
     {
@@ -1660,16 +1662,16 @@ static void EndFrame()
              "{} upscales given an offset older than "
              "the frame's, {} given the frame's offset before any of its draws; last depth-bound geometry viewport "
              "of another size {}x{}",
-             jitterFrames, g_jitteredDraws.exchange(0), g_otherDraws.exchange(0),
-             g_stale.exchange(0), g_beforeScene.exchange(0),
-             other >> 16, other & 0xFFFF);
+             jitterFrames, g_jitteredDraws.exchange(0), g_otherDraws.exchange(0), g_stale.exchange(0),
+             g_beforeScene.exchange(0), other >> 16, other & 0xFFFF);
     LOG_INFO("Spatial pass: scene jitter: {} lists were recorded across the game's present, each keeping the offset "
-             "it began with", g_midList.exchange(0));
+             "it began with",
+             g_midList.exchange(0));
     LOG_INFO("Spatial pass: frame generation given the sharpened frame as its HUD-less colour {} times ({} refused, "
              "{} not the swap chain's size, {} inside a render pass); {} replaced frames without a sharpening pass "
              "taking the upscale, {} sharpening passes read something else",
-             g_hudless.exchange(0), g_hudlessRefused.exchange(0), g_hudlessSize.exchange(0), g_hudlessInPass.exchange(0),
-             g_hudlessMissed.exchange(0), g_hudlessOther.exchange(0));
+             g_hudless.exchange(0), g_hudlessRefused.exchange(0), g_hudlessSize.exchange(0),
+             g_hudlessInPass.exchange(0), g_hudlessMissed.exchange(0), g_hudlessOther.exchange(0));
     const auto tables = g_tables.TakeCounts();
     LOG_INFO("Spatial pass: {} FSR1 pipeline binds; list tables of their own {} ({} patched, {} repatched, {} foreign, "
              "{} failed)",
@@ -1699,7 +1701,8 @@ void OnPresent()
     if (ThreadHasNoTls() || !Installed())
         return;
     g_swapPresents.fetch_add(1, std::memory_order_relaxed);
-    if (native::lowlatency::SwapChainPresentIgnored(Util::MillisecondsNow(), g_fgPresentMs.load(std::memory_order_relaxed)))
+    if (native::lowlatency::SwapChainPresentIgnored(Util::MillisecondsNow(),
+                                                    g_fgPresentMs.load(std::memory_order_relaxed)))
         return;
     if (g_frameSource.exchange(1) != 1)
         LOG_INFO("Spatial pass: the game's frames end at its swap chain present");
